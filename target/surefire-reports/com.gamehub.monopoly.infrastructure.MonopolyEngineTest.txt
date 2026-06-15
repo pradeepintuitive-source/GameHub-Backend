@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.gamehub.monopoly.infrastructure.MonopolyEngineTest
+-------------------------------------------------------------------------------
+Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.197 s -- in com.gamehub.monopoly.infrastructure.MonopolyEngineTest

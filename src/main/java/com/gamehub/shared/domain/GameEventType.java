@@ -1,0 +1,18 @@
+package com.gamehub.shared.domain;
+
+public enum GameEventType {
+    PLAYER_JOINED,
+    PLAYER_LEFT,
+    PLAYER_DISCONNECTED,
+    PLAYER_RECONNECTED,
+    GAME_STARTED,
+    GAME_PAUSED,
+    GAME_RESUMED,
+    GAME_ENDED,
+    CHAT_MESSAGE_SENT,
+    ROOM_UPDATED,
+    PLAYER_MOVED,
+    PROPERTY_PURCHASED,
+    ROLE_ASSIGNED,
+    PLAYER_VOTED
+}

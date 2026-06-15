@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:gamehub;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: true
+
+gamehub:
+  security:
+    jwt-secret: test-secret-test-secret-test-secret-1234
+    access-token-minutes: 240
+  websocket:
+    allowed-origins: http://localhost:3000
+  chat:
+    max-message-length: 500
+    max-messages-per-minute: 20
