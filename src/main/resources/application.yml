@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: gamehub
+  datasource:
+    url: ${GAMEHUB_DB_URL:jdbc:postgresql://localhost:5432/gamehub}
+    username: ${GAMEHUB_DB_USERNAME:postgres}
+    password: ${GAMEHUB_DB_PASSWORD:Test@123}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  port: ${PORT:8080}
+
+logging:
+  level:
+    com.gamehub: INFO
+
+gamehub:
+  security:
+    jwt-secret: ${GAMEHUB_JWT_SECRET:change-me-change-me-change-me-change-me}
+    access-token-minutes: 240
+  websocket:
+    allowed-origins: ${GAMEHUB_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+  chat:
+    max-message-length: 500
+    max-messages-per-minute: 20
+  ollama:
+    enabled: ${GAMEHUB_OLLAMA_ENABLED:true}
+    base-url: ${GAMEHUB_OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${GAMEHUB_OLLAMA_MODEL:mistral}
+    timeout-seconds: ${GAMEHUB_OLLAMA_TIMEOUT:30}
+
