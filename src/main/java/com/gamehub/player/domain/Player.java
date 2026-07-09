@@ -10,6 +10,7 @@ public record Player(
         UUID userId,
         String displayName,
         boolean connected,
+        boolean ready,
         boolean aiControlled,
         AiType aiType,
         AiDifficulty aiDifficulty,
