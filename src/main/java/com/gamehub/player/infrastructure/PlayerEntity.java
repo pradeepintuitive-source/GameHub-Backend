@@ -30,6 +30,9 @@ public class PlayerEntity extends BaseEntity {
     @Column(nullable = false)
     private boolean connected;
 
+    @Column(nullable = false)
+    private boolean ready;
+
     @Column(name = "ai_controlled", nullable = false)
     private boolean aiControlled;
 

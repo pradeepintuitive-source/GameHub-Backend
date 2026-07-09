@@ -21,6 +21,7 @@ spring:
 
 server:
   port: ${PORT:8080}
+  forward-headers-strategy: framework
 
 logging:
   level:
@@ -31,13 +32,17 @@ gamehub:
     jwt-secret: ${GAMEHUB_JWT_SECRET:change-me-change-me-change-me-change-me}
     access-token-minutes: 240
   websocket:
-    allowed-origins: ${GAMEHUB_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+    # Comma-separated list of allowed origins for CORS
+    # Include the production and preview frontend URLs plus wildcard patterns for Vercel/Lovable hosts.
+    allowed-origins: ${GAMEHUB_ALLOWED_ORIGINS:https://boardgame-verse.vercel.app,https://preview--boardgame-verse.lovable.app,https://*.vercel.app,https://*.lovable.app,https://giuseppina-proctological-malachi.ngrok-free.dev,http://localhost:5173,http://localhost:4173,http://192.168.31.103:4173}
+  # Set to true to enable credentials with CORS (only when using specific origins, NOT wildcards)
+  enable-cors-credentials: ${GAMEHUB_ENABLE_CORS_CREDENTIALS:false}
   chat:
     max-message-length: 500
     max-messages-per-minute: 20
   ollama:
     enabled: ${GAMEHUB_OLLAMA_ENABLED:true}
     base-url: ${GAMEHUB_OLLAMA_BASE_URL:http://localhost:11434}
-    model: ${GAMEHUB_OLLAMA_MODEL:mistral}
+    model: ${GAMEHUB_OLLAMA_MODEL:qwen2.5:7b}
     timeout-seconds: ${GAMEHUB_OLLAMA_TIMEOUT:30}
 

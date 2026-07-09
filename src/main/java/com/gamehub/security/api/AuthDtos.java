@@ -1,5 +1,7 @@
 package com.gamehub.security.api;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.gamehub.security.domain.UserRole;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -23,6 +25,8 @@ public final class AuthDtos {
     }
 
     public record LoginRequest(
+            @JsonProperty("identifier")
+            @JsonAlias({"username", "email", "user"})
             @NotBlank String identifier,
             @NotBlank String password) {
     }
@@ -49,5 +53,20 @@ public final class AuthDtos {
             String refreshToken,
             Set<UserRole> roles,
             boolean guest) {
+
+        @JsonProperty("id")
+        public UUID id() {
+            return userId;
+        }
+
+        @JsonProperty("accessToken")
+        public String accessToken() {
+            return token;
+        }
+
+        @JsonProperty("isGuest")
+        public boolean isGuest() {
+            return guest;
+        }
     }
 }

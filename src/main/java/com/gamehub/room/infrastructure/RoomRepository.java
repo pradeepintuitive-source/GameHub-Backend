@@ -11,5 +11,7 @@ public interface RoomRepository extends JpaRepository<RoomEntity, UUID> {
 
     Optional<RoomEntity> findByRoomCode(String roomCode);
 
+    Optional<RoomEntity> findByRoomCodeIgnoreCase(String roomCode);
+
     List<RoomEntity> findByVisibilityAndStateIn(RoomVisibility visibility, List<RoomState> states);
 }

@@ -54,6 +54,7 @@ public final class RoomDtos {
             UUID userId,
             String displayName,
             boolean connected,
+            boolean ready,
             boolean aiControlled,
             AiType aiType,
             AiDifficulty aiDifficulty,
