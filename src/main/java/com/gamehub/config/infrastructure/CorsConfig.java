@@ -1,6 +1,7 @@
 package com.gamehub.config.infrastructure;
 
 import java.util.Arrays;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -14,30 +15,28 @@ import org.springframework.web.filter.CorsFilter;
 @Configuration
 public class CorsConfig {
 
-    @Value("${gamehub.websocket.allowed-origins:https://boardgame-verse.vercel.app,https://preview--boardgame-verse.lovable.app,https://*.vercel.app,https://*.lovable.app,http://localhost:5173,http://localhost:4173,http://192.168.31.103:4173}")
+    @Value("${gamehub.websocket.allowed-origins:*}")
     private String allowedOrigins;
-
-    @Value("${gamehub.enable-cors-credentials:false}")
-    private boolean enableCredentials;
 
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        String[] origins = Arrays.stream(allowedOrigins.split(","))
+        List<String> patterns = Arrays.stream(allowedOrigins.split(","))
                 .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .toArray(String[]::new);
-        // Use allowed origin patterns to support dynamic hosts (ngrok)
-        for (String o : origins) {
-            config.addAllowedOriginPattern(o);
+                .filter(origin -> !origin.isEmpty())
+                .toList();
+        if (patterns.isEmpty()) {
+            patterns = List.of("*");
         }
-        config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"));
+
+        config.setAllowedOriginPatterns(patterns);
+        config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"));
         config.setAllowedHeaders(Arrays.asList("*"));
         config.setExposedHeaders(Arrays.asList("Authorization", "Content-Type", "X-Requested-With"));
-        config.setAllowCredentials(enableCredentials);
+        config.setAllowCredentials(false);
 
-        System.out.println("CorsConfig: allowedOrigins=" + Arrays.toString(origins));
-        System.out.println("CorsConfig: allowCredentials=" + enableCredentials);
+        System.out.println("CorsConfig: allowedOrigins=" + patterns);
+        System.out.println("CorsConfig: allowCredentials=false");
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         // Apply to all paths including SockJS endpoints

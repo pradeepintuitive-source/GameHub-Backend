@@ -1,11 +1,25 @@
 package com.gamehub.websocket.infrastructure;
 
+import com.gamehub.security.application.JwtService;
+import java.security.Principal;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpHeaders;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageDeliveryException;
+import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
+import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
 import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
@@ -29,9 +43,15 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtHandshakeInterceptor jwtHandshakeInterceptor;
+    private final JwtService jwtService;
 
-    @Value("${gamehub.websocket.allowed-origins:https://boardgame-verse.vercel.app,https://preview--boardgame-verse.lovable.app,https://*.vercel.app,https://*.lovable.app,http://localhost:5173,http://localhost:4173}")
+    @Value("${gamehub.websocket.allowed-origins:*}")
     private String allowedOrigins;
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(stompAuthChannelInterceptor());
+    }
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
@@ -44,18 +64,19 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
-        // Parse allowed origins from configuration
-        String[] origins = Arrays.stream(allowedOrigins.split(","))
+        List<String> patterns = Arrays.stream(allowedOrigins.split(","))
                 .map(String::trim)
                 .filter(origin -> !origin.isEmpty())
-                .toArray(String[]::new);
+                .toList();
+        if (patterns.isEmpty()) {
+            patterns = List.of("*");
+        }
 
-        System.out.println("WebSocketConfig: Configured origins for /ws = " + Arrays.toString(origins));
+        System.out.println("WebSocketConfig: Configured origins for /ws = " + patterns);
 
         registry.addEndpoint("/ws")
-                // Use the same origins as DevCorsConfig to maintain consistency
-                // These are used for WebSocket handshake validation
-                .setAllowedOriginPatterns(origins)
+                // Allow all origins for WebSocket/STOMP handshake
+                .setAllowedOriginPatterns("*")
                 // JWT validation during WebSocket handshake
                 .addInterceptors(jwtHandshakeInterceptor)
                 // Custom principal handler
@@ -63,11 +84,60 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 // Enable SockJS fallback for browsers that don't support WebSocket
                 .withSockJS()
                 // SockJS configuration
+                .setSessionCookieNeeded(false)
                 .setHeartbeatTime(10000)
                 .setDisconnectDelay(5000)
                 .setHttpMessageCacheSize(1024)
                 .setWebSocketEnabled(true)
                 .setStreamBytesLimit(512 * 1024);
+    }
+
+    @Bean
+    ChannelInterceptor stompAuthChannelInterceptor() {
+        return new ChannelInterceptor() {
+            @Override
+            public Message<?> preSend(Message<?> message, MessageChannel channel) {
+                StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+                if (accessor == null || accessor.getCommand() != StompCommand.CONNECT) {
+                    return message;
+                }
+
+                Principal existingPrincipal = accessor.getUser();
+                if (existingPrincipal != null) {
+                    return message;
+                }
+
+                Map<String, Object> sessionAttributes = accessor.getSessionAttributes();
+                if (sessionAttributes != null && sessionAttributes.get("userId") != null) {
+                    accessor.setUser(() -> sessionAttributes.get("userId").toString());
+                    return MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders());
+                }
+
+                String token = resolveToken(accessor);
+                if (token != null && jwtService.isValid(token)) {
+                    accessor.setUser(() -> jwtService.extractUserId(token).toString());
+                    return MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders());
+                }
+
+                throw new MessageDeliveryException("Authentication required");
+            }
+        };
+    }
+
+    private String resolveToken(StompHeaderAccessor accessor) {
+        List<String> authorizationHeaders = accessor.getNativeHeader(HttpHeaders.AUTHORIZATION);
+        if (authorizationHeaders != null && !authorizationHeaders.isEmpty()) {
+            String authorization = authorizationHeaders.getFirst();
+            if (authorization != null && authorization.startsWith("Bearer ")) {
+                return authorization.substring(7);
+            }
+            return authorization;
+        }
+        List<String> tokenHeaders = accessor.getNativeHeader("token");
+        if (tokenHeaders != null && !tokenHeaders.isEmpty()) {
+            return tokenHeaders.getFirst();
+        }
+        return null;
     }
 
     @Bean
