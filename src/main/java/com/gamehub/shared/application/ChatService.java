@@ -84,7 +84,7 @@ public class ChatService {
         auditService.record(AuditType.CHAT, roomId, null, principal.userId(), "Chat message sent", entity.getContent());
         gameEventService.record(roomId, null, GameEventType.CHAT_MESSAGE_SENT, principal.userId(), entity.getContent());
         notificationService.sendToTopic(
-                "/topic/chat/" + roomId,
+                "/topic/rooms/" + roomId + "/chat",
                 new NotificationMessage("CHAT_MESSAGE", roomId, null, response, Instant.now()));
         if (request.targetUserId() != null) {
             notificationService.sendToUser(

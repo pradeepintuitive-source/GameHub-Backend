@@ -17,8 +17,8 @@ public record MonopolyGameState(
         Map<UUID, PlayerAsset> assets,
         Map<Integer, UUID> owners,
         Map<Integer, PropertyDevelopment> developments,
-        Set<Integer> mortgagedTiles,
-        List<String> log) implements GameState {
+    Set<Integer> mortgagedTiles,
+    List<String> log) implements GameState {
 
     @Override
     public GameType gameType() {

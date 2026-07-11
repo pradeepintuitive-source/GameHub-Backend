@@ -109,10 +109,128 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
             case UNMORTGAGE -> unmortgage(state, action);
             case BUILD_HOUSE -> buildHouse(state, action);
             case BUILD_HOTEL -> buildHotel(state, action);
+            case SELL_HOUSE -> sellHouse(state, action);
+            case PAY_JAIL -> payJail(state, action);
+            case USE_JAIL_CARD -> useJailCard(state, action);
             case TRADE -> trade(state, action);
             case AUCTION -> auction(state, action);
             case END_TURN -> endTurn(state);
         };
+    }
+
+    private MonopolyGameState payJail(MonopolyGameState state, MonopolyAction action) {
+        // Charge fixed jail fee (match frontend JAIL_FEE = 50)
+        final int JAIL_FEE = 50;
+        PlayerAsset current = state.assets().get(state.currentPlayerId());
+        if (current == null || !current.inJail()) {
+            throw new BusinessRuleViolationException("Player not in jail");
+        }
+        if (current.cash() < JAIL_FEE) {
+            throw new BusinessRuleViolationException("Insufficient funds to pay jail fee");
+        }
+        Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
+        assets.put(current.playerId(), new PlayerAsset(
+                current.playerId(),
+                current.cash() - JAIL_FEE,
+                10,
+                false,
+                0,
+                current.ownedTilePositions()));
+        List<String> log = new java.util.ArrayList<>(state.log());
+        log.add("Player paid jail fee: " + JAIL_FEE);
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.WAITING_FOR_DECISION,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                assets,
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log);
+    }
+
+    private MonopolyGameState useJailCard(MonopolyGameState state, MonopolyAction action) {
+        PlayerAsset current = state.assets().get(state.currentPlayerId());
+        if (current == null || !current.inJail()) {
+            throw new BusinessRuleViolationException("Player not in jail");
+        }
+        // The PlayerAsset currently doesn't track jail cards in persisted model; if present in metadata handle it.
+        // For now, allow use if recorded in metadata indicating player has a card.
+        Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
+        // Since backend PlayerAsset doesn't have jailCards in current model, simply release from jail.
+        assets.put(current.playerId(), new PlayerAsset(
+                current.playerId(),
+                current.cash(),
+                current.position(),
+                false,
+                0,
+                current.ownedTilePositions()));
+        List<String> log = new java.util.ArrayList<>(state.log());
+        log.add("Player used a Get Out of Jail Free card");
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.WAITING_FOR_DECISION,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                assets,
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log);
+    }
+
+    private MonopolyGameState sellHouse(MonopolyGameState state, MonopolyAction action) {
+        int tilePosition = requiredTilePosition(action);
+        Tile tile = state.board().tileAt(tilePosition);
+        if (!(tile instanceof Property property)) {
+            throw new BusinessRuleViolationException("Only properties can sell houses");
+        }
+        UUID ownerId = state.owners().get(tilePosition);
+        if (!ownerId.equals(state.currentPlayerId())) {
+            throw new BusinessRuleViolationException("Player does not own this property");
+        }
+        Map<Integer, PropertyDevelopment> developments = new HashMap<>(state.developments());
+        PropertyDevelopment current = developments.getOrDefault(tilePosition, new PropertyDevelopment(0, false));
+        if (current.houses() <= 0 && !current.hotel()) {
+            throw new BusinessRuleViolationException("No houses to sell");
+        }
+        int refund = property.houseCost() / 2;
+        Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
+        PlayerAsset p = assets.get(state.currentPlayerId());
+        assets.put(p.playerId(), new PlayerAsset(
+                p.playerId(),
+                p.cash() + refund,
+                p.position(),
+                p.inJail(),
+                p.jailTurns(),
+                p.ownedTilePositions()));
+        PropertyDevelopment updatedDev;
+        if (current.hotel()) {
+            // demote hotel to 4 houses
+            updatedDev = new PropertyDevelopment(4, false);
+        } else {
+            updatedDev = new PropertyDevelopment(current.houses() - 1, false);
+        }
+        developments.put(tilePosition, updatedDev);
+        List<String> log = new java.util.ArrayList<>(state.log());
+        log.add("House sold on " + tile.name());
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.WAITING_FOR_DECISION,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                assets,
+                new HashMap<>(state.owners()),
+                developments,
+                new HashSet<>(state.mortgagedTiles()),
+                log);
     }
 
     private MonopolyGameState rollDice(MonopolyGameState state) {

@@ -8,6 +8,9 @@ public enum MonopolyActionType {
     UNMORTGAGE,
     BUILD_HOUSE,
     BUILD_HOTEL,
+    SELL_HOUSE,
+    PAY_JAIL,
+    USE_JAIL_CARD,
     TRADE,
     AUCTION,
     END_TURN

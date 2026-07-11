@@ -1,6 +1,7 @@
 package com.gamehub.websocket.infrastructure;
 
 import com.gamehub.security.application.JwtService;
+import com.gamehub.security.infrastructure.GameHubUserDetailsService;
 import java.security.Principal;
 import java.util.Arrays;
 import java.util.List;
@@ -44,6 +45,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtHandshakeInterceptor jwtHandshakeInterceptor;
     private final JwtService jwtService;
+    private final GameHubUserDetailsService userDetailsService;
 
     @Value("${gamehub.websocket.allowed-origins:*}")
     private String allowedOrigins;
@@ -151,6 +153,6 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Bean
     WebSocketPrincipalHandshakeHandler webSocketPrincipalHandshakeHandler() {
-        return new WebSocketPrincipalHandshakeHandler();
+        return new WebSocketPrincipalHandshakeHandler(userDetailsService);
     }
 }

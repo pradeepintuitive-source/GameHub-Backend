@@ -4,6 +4,7 @@ import com.gamehub.ai.domain.AiDifficulty;
 import com.gamehub.ai.domain.AiType;
 import com.gamehub.audit.application.AuditService;
 import com.gamehub.audit.domain.AuditType;
+import com.gamehub.common.domain.ApiException;
 import com.gamehub.common.domain.BusinessRuleViolationException;
 import com.gamehub.notification.application.NotificationService;
 import com.gamehub.notification.domain.NotificationMessage;
@@ -26,8 +27,11 @@ import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 @Transactional
@@ -77,9 +81,7 @@ public class RoomService {
 
         auditService.record(AuditType.ROOM_EVENT, roomEntity.getId(), null, principal.userId(), "Room created", roomEntity.getRoomCode());
         gameEventService.record(roomEntity.getId(), null, GameEventType.ROOM_UPDATED, principal.userId(), "Room created");
-        // Broadcast the newly created room to subscribers of the room topic
-        RoomDtos.RoomResponse created = toResponse(roomEntity);
-        lobbyBroadcaster.broadcastRoom(roomEntity.getId(), created);
+        broadcastRoomAfterCommit(roomEntity.getId());
 
         logger.info("Room created id={} code={} hostUserId={}", roomEntity.getId(), roomEntity.getRoomCode(), principal.userId());
         return toResponse(roomEntity);
@@ -98,11 +100,18 @@ public class RoomService {
     public RoomDtos.RoomResponse joinRoom(GameHubUserPrincipal principal, RoomDtos.JoinRoomRequest request) {
         logger.info("joinRoom for user={} request={} roomCode={}", principal.userId(), request, request.roomCode());
         RoomEntity room = resolveRoom(request);
+        if (playerRepository.findByRoomIdAndUserId(room.getId(), principal.userId()).isPresent()) {
+            PlayerEntity existingPlayer = playerRepository.findByRoomIdAndUserId(room.getId(), principal.userId()).get();
+            existingPlayer.setConnected(true);
+            playerRepository.save(existingPlayer);
+            broadcastRoomAfterCommit(room.getId());
+            return toResponse(room);
+        }
+        if (room.getState() != RoomState.WAITING) {
+            throw new ApiException(HttpStatus.CONFLICT, "Room is not accepting new players", List.of());
+        }
         if (playerRepository.countByRoomId(room.getId()) >= room.getMaxPlayers()) {
             throw new BusinessRuleViolationException("Room is full");
-        }
-        if (playerRepository.findByRoomIdAndUserId(room.getId(), principal.userId()).isPresent()) {
-            return reconnect(principal, room.getId());
         }
         var user = userService.getCurrentUser(principal);
         PlayerEntity player = new PlayerEntity();
@@ -111,15 +120,15 @@ public class RoomService {
         player.setUserId(principal.userId());
         player.setDisplayName(user.profile().displayName());
         player.setConnected(true);
+        player.setReady(false);
         player.setAiControlled(false);
         player.setSeatOrder((int) playerRepository.countByRoomId(room.getId()) + 1);
         playerRepository.save(player);
 
         auditService.record(AuditType.ROOM_EVENT, room.getId(), null, principal.userId(), "Player joined room", user.username());
         gameEventService.record(room.getId(), room.getCurrentSessionId(), GameEventType.PLAYER_JOINED, principal.userId(), user.username());
-        RoomDtos.RoomResponse joined = toResponse(room);
-        lobbyBroadcaster.broadcastRoom(room.getId(), joined);
-        return joined;
+        broadcastRoomAfterCommit(room.getId());
+        return toResponse(room);
     }
 
     public RoomDtos.RoomResponse addAiPlayer(GameHubUserPrincipal principal, UUID roomId, RoomDtos.AddAiPlayerRequest request) {
@@ -149,9 +158,8 @@ public class RoomService {
                 "AI player added",
                 request.displayName() + ":" + request.aiType() + ":" + request.aiDifficulty());
         gameEventService.record(roomId, room.getCurrentSessionId(), GameEventType.PLAYER_JOINED, principal.userId(), request.displayName());
-        RoomDtos.RoomResponse added = toResponse(room);
-        lobbyBroadcaster.broadcastRoom(roomId, added);
-        return added;
+        broadcastRoomAfterCommit(roomId);
+        return toResponse(room);
     }
 
     public RoomDtos.RoomResponse leaveRoom(GameHubUserPrincipal principal, UUID roomId) {
@@ -163,18 +171,23 @@ public class RoomService {
         gameEventService.record(roomId, room.getCurrentSessionId(), GameEventType.PLAYER_LEFT, principal.userId(), player.getDisplayName());
 
         if (principal.userId().equals(room.getHostUserId())) {
-            List<PlayerEntity> remaining = playerRepository.findByRoomIdOrderBySeatOrder(roomId);
+            List<PlayerEntity> remaining = playerRepository.findByRoomIdOrderBySeatOrder(roomId).stream()
+                    .filter(candidate -> !candidate.isAiControlled())
+                    .toList();
             if (remaining.isEmpty()) {
+                playerRepository.findByRoomIdOrderBySeatOrder(roomId).forEach(playerRepository::delete);
                 roomRepository.delete(room);
-                lobbyBroadcaster.broadcastRoom(roomId, null);
+                broadcastRoomClosedAfterCommit(roomId);
                 return null;
             }
-            room.setHostUserId(remaining.getFirst().getUserId());
+            PlayerEntity nextHost = remaining.stream()
+                    .min(java.util.Comparator.comparingInt(PlayerEntity::getSeatOrder).thenComparing(PlayerEntity::getCreatedAt))
+                    .orElse(remaining.getFirst());
+            room.setHostUserId(nextHost.getUserId());
             roomRepository.save(room);
         }
-        RoomDtos.RoomResponse left = toResponse(room);
-        lobbyBroadcaster.broadcastRoom(roomId, left);
-        return left;
+        broadcastRoomAfterCommit(roomId);
+        return toResponse(room);
     }
 
     public RoomDtos.RoomResponse reconnect(GameHubUserPrincipal principal, UUID roomId) {
@@ -189,9 +202,8 @@ public class RoomService {
             principal.userId(),
             "/queue/private",
             new NotificationMessage("PLAYER_RECONNECTED", roomId, room.getCurrentSessionId(), toResponse(room), Instant.now()));
-        RoomDtos.RoomResponse reconnected = toResponse(room);
-        lobbyBroadcaster.broadcastRoom(roomId, reconnected);
-        return reconnected;
+        broadcastRoomAfterCommit(roomId);
+        return toResponse(room);
     }
 
     public RoomDtos.RoomResponse closeRoom(GameHubUserPrincipal principal, UUID roomId) {
@@ -204,7 +216,7 @@ public class RoomService {
         notificationService.sendToTopic(
             "/topic/rooms",
             new NotificationMessage("ROOM_CLOSED", roomId, room.getCurrentSessionId(), room.getRoomCode(), Instant.now()));
-        lobbyBroadcaster.broadcastRoom(roomId, null);
+        broadcastRoomClosedAfterCommit(roomId);
         return null;
     }
 
@@ -213,19 +225,20 @@ public class RoomService {
                 .filter(player -> player.getUserId().equals(userId))
                 .toList();
         for (PlayerEntity player : activePlayers) {
+            RoomEntity room = roomRepository.findById(player.getRoomId()).orElse(null);
+            if (room == null || room.getState() != RoomState.WAITING) {
+                continue;
+            }
             player.setConnected(false);
             playerRepository.save(player);
             gameEventService.record(player.getRoomId(), null, GameEventType.PLAYER_DISCONNECTED, userId, player.getDisplayName());
             saveGameService.autoSaveCurrentSessionForRoom(player.getRoomId(), userId, "PLAYER_DISCONNECT");
-            // Broadcast updated room state to subscribers
             try {
-                RoomDtos.RoomResponse updated = toResponse(requireRoom(player.getRoomId()));
-                lobbyBroadcaster.broadcastRoom(player.getRoomId(), updated);
+                broadcastRoomAfterCommit(player.getRoomId());
             } catch (Exception e) {
                 // ignore missing room during disconnect handling
             }
         }
-
     }
 
     public RoomDtos.RoomResponse setReady(GameHubUserPrincipal principal, UUID roomId, boolean ready) {
@@ -236,9 +249,8 @@ public class RoomService {
         playerRepository.save(player);
         auditService.record(AuditType.ROOM_EVENT, roomId, room.getCurrentSessionId(), principal.userId(), "Player ready toggled", String.valueOf(ready));
         gameEventService.record(roomId, room.getCurrentSessionId(), GameEventType.PLAYER_UPDATED, principal.userId(), player.getDisplayName());
-        RoomDtos.RoomResponse updated = toResponse(room);
-        lobbyBroadcaster.broadcastRoom(roomId, updated);
-        return updated;
+        broadcastRoomAfterCommit(roomId);
+        return toResponse(room);
     }
 
     @Transactional(readOnly = true)
@@ -289,6 +301,36 @@ public class RoomService {
                 roomEntity.getMaxPlayers(),
                 players,
                 roomEntity.getCurrentSessionId());
+    }
+
+    private void broadcastRoomAfterCommit(UUID roomId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            broadcastRoomSnapshot(roomId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                broadcastRoomSnapshot(roomId);
+            }
+        });
+    }
+
+    private void broadcastRoomClosedAfterCommit(UUID roomId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            lobbyBroadcaster.broadcastRoomClosed(roomId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                lobbyBroadcaster.broadcastRoomClosed(roomId);
+            }
+        });
+    }
+
+    private void broadcastRoomSnapshot(UUID roomId) {
+        roomRepository.findById(roomId).ifPresent(room -> lobbyBroadcaster.broadcastRoom(roomId, toResponse(room)));
     }
 
     private String generateRoomCode() {

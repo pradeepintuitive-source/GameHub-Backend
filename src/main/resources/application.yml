@@ -32,10 +32,9 @@ gamehub:
     jwt-secret: ${GAMEHUB_JWT_SECRET:change-me-change-me-change-me-change-me}
     access-token-minutes: 240
   websocket:
-    # Comma-separated list of allowed origins for CORS
-    # Include the production and preview frontend URLs plus wildcard patterns for Vercel/Lovable hosts.
-    allowed-origins: ${GAMEHUB_ALLOWED_ORIGINS:https://boardgame-verse.vercel.app,https://preview--boardgame-verse.lovable.app,https://*.vercel.app,https://*.lovable.app,https://giuseppina-proctological-malachi.ngrok-free.dev,http://localhost:5173,http://localhost:4173,http://192.168.31.103:4173}
-  # Set to true to enable credentials with CORS (only when using specific origins, NOT wildcards)
+    # Allow any frontend origin for REST and SockJS/WebSocket endpoints.
+    allowed-origins: ${GAMEHUB_ALLOWED_ORIGINS:*}
+  # Credentials are disabled for stateless JWT bearer auth.
   enable-cors-credentials: ${GAMEHUB_ENABLE_CORS_CREDENTIALS:false}
   chat:
     max-message-length: 500

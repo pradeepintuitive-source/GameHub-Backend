@@ -1,5 +1,4 @@
 package com.gamehub.shared.domain;
-
 public enum GameEventType {
     PLAYER_JOINED,
     PLAYER_LEFT,
@@ -14,5 +13,6 @@ public enum GameEventType {
     PLAYER_MOVED,
     PROPERTY_PURCHASED,
     ROLE_ASSIGNED,
-    PLAYER_VOTED
+    PLAYER_VOTED,
+    PLAYER_UPDATED   
 }

@@ -4,6 +4,7 @@ import com.gamehub.security.application.JwtService;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.http.server.ServletServerHttpRequest;
@@ -56,14 +57,15 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
                     attributes.put("userId", jwtService.extractUserId(token).toString());
                     attributes.put("username", jwtService.extractUsername(token));
                     log.info("✓ WebSocket authenticated with user: {}", jwtService.extractUsername(token));
-                } else {
-                    log.warn("✗ WebSocket token validation failed for token: {}", token.substring(0, Math.min(20, token.length())) + "...");
+                    return true;
                 }
+                log.warn("✗ WebSocket token validation failed for token: {}", token.substring(0, Math.min(20, token.length())) + "...");
             } else {
-                log.debug("⚠ WebSocket request without auth header or token param - allowing as unauthenticated (guest connection)");
+                log.debug("⚠ WebSocket request without auth header or token param - rejecting unauthenticated websocket connection");
             }
         }
-        return true;  // Allow handshake to proceed (authentication is optional for guests)
+        response.setStatusCode(HttpStatus.UNAUTHORIZED);
+        return false;
     }
 
     @Override
