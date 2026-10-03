@@ -6,7 +6,10 @@ import java.util.UUID;
 
 /**
  * Broadcast to /topic/rooms/{roomId}/voice whenever the participant list changes.
- * Clients use this to render mic icons and know which peers to connect/disconnect with.
+ *
+ * <p>Clients use this to render mic icons and to know which peers to connect/disconnect with.
+ * The {@code participants} set contains the auth user-id (UUID) of every user currently in voice.
+ * Jackson serialises UUIDs as strings, so the wire format matches the spec exactly.
  */
 public record VoicePresenceMessage(
         String   type,

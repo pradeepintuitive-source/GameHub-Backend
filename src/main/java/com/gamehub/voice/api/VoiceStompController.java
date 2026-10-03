@@ -1,5 +1,6 @@
 package com.gamehub.voice.api;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import com.gamehub.voice.application.VoiceSignalingService;
 import java.security.Principal;
@@ -86,6 +87,12 @@ public class VoiceStompController {
         return null;
     }
 
-    /** Inbound payload for mute/unmute requests. */
+    /**
+     * Inbound payload for mute/unmute requests.
+     *
+     * <p>{@code JsonIgnoreProperties(ignoreUnknown = true)} tolerates extra client-side fields
+     * (e.g. {@code requestId}) without throwing a deserialization error.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public record VoiceMuteRequest(boolean muted) {}
 }

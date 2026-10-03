@@ -25,6 +25,9 @@ import org.springframework.stereotype.Service;
  * </ol>
  *
  * <p>The server is media-agnostic -- it never touches SDP or ICE payload bytes.
+ *
+ * <p>All user identity uses the authenticated user UUID (same as {@code user.id} /
+ * {@code player.userId}). Usernames and in-game player ids are not used here.
  */
 @Service
 @RequiredArgsConstructor
@@ -41,6 +44,7 @@ public class VoiceSignalingService {
 
     /**
      * Add userId to the voice room and broadcast the updated participant list.
+     * Joining twice is idempotent: no second entry is created and no extra broadcast fires.
      *
      * @return the updated participant set (including the new joiner)
      */
@@ -77,29 +81,41 @@ public class VoiceSignalingService {
     // ── Signal relay ──────────────────────────────────────────────────────────
 
     /**
-     * Relay a unicast signaling message from fromUserId to the target peer.
-     * Both peers must be active participants of the same voice room.
+     * Relay a unicast WebRTC signaling message from {@code fromUserId} to the target peer.
+     *
+     * <p>The sender must be an active participant. The {@code fromUserId} is always stamped
+     * from the authenticated principal -- the client-supplied value is ignored.
+     *
+     * <p>ICE candidates may arrive before both peers have registered; only the sender's
+     * membership is enforced so that fast ICE trickle is not dropped.
      */
     public void relaySignal(UUID roomId, UUID fromUserId, VoiceSignalMessage inbound) {
         if (inbound.toUserId() == null) {
-            log.warn("Signal relay rejected: toUserId null. roomId={} from={} type={}", roomId, fromUserId, inbound.type());
+            log.warn("Signal relay rejected: toUserId null. roomId={} from={} type={}",
+                    roomId, fromUserId, inbound.type());
             return;
         }
+
         VoiceRoomState state = registry.find(roomId).orElse(null);
-        if (state == null || !state.isParticipant(fromUserId) || !state.isParticipant(inbound.toUserId())) {
-            log.warn("Signal relay rejected: peer not in voice room. roomId={} from={} to={}", roomId, fromUserId, inbound.toUserId());
+        if (state == null || !state.isParticipant(fromUserId)) {
+            log.warn("Signal relay rejected: sender not in voice room. roomId={} from={} to={}",
+                    roomId, fromUserId, inbound.toUserId());
             return;
         }
+
+        // Stamp fromUserId from the authenticated session; forward type, toUserId, payload unchanged.
         VoiceSignalMessage outbound = VoiceSignalMessage.relay(
                 inbound.type(), roomId, fromUserId, inbound.toUserId(), inbound.payload());
         relayToPeer(inbound.toUserId(), outbound);
-        log.debug("Signal relayed: type={} roomId={} from={} to={}", inbound.type(), roomId, fromUserId, inbound.toUserId());
+        log.debug("Signal relayed: type={} roomId={} from={} to={}",
+                inbound.type(), roomId, fromUserId, inbound.toUserId());
     }
 
     // ── Mute state ────────────────────────────────────────────────────────────
 
     /**
      * Update mute state for userId and broadcast MUTE_STATE to the entire room topic.
+     * The {@code fromUserId} is stamped by the server from the authenticated principal.
      */
     public void updateMuteState(UUID roomId, UUID userId, boolean muted) {
         registry.find(roomId).ifPresent(state -> {

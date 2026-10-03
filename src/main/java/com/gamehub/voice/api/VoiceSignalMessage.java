@@ -1,5 +1,6 @@
 package com.gamehub.voice.api;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.gamehub.voice.domain.VoiceSignalType;
 import jakarta.validation.constraints.NotNull;
 import java.time.Instant;
@@ -10,14 +11,14 @@ import java.util.UUID;
  *
  * <p>The backend never inspects {@code payload} -- it simply relays it to the target peer.
  *
- * <p>Inbound (client to server):
- *   SEND /app/voice/{roomId}/signal
- *   { "type": "OFFER", "toUserId": "<uuid>", "payload": { "sdp": "..." } }
+ * <p>Inbound (client to server): SEND /app/voice/{roomId}/signal
  *
- * <p>Outbound (server to client):
- *   /user/queue/voice
- *   { "type": "OFFER", "fromUserId": "<uuid>", "roomId": "<uuid>", "payload": {...} }
+ * <p>Outbound (server to client): /user/queue/voice
+ *
+ * <p>{@code JsonIgnoreProperties(ignoreUnknown = true)} ensures extra client-side fields
+ * such as {@code requestId} are silently dropped rather than causing a deserialization error.
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record VoiceSignalMessage(
 
         /** Discriminator that tells the receiver what to do with payload. */
@@ -38,10 +39,10 @@ public record VoiceSignalMessage(
 
         /**
          * Opaque payload forwarded as-is.
-         *   OFFER / ANSWER  -> { "sdp": "..." }
-         *   ICE_CANDIDATE   -> { "candidate": "...", "sdpMid": "...", "sdpMLineIndex": N }
+         *   OFFER / ANSWER  -> sdp object
+         *   ICE_CANDIDATE   -> candidate / sdpMid / sdpMLineIndex
          *   HANG_UP         -> {}
-         *   MUTE_STATE      -> { "muted": true }
+         *   MUTE_STATE      -> { muted: true }
          */
         Object payload,
 
