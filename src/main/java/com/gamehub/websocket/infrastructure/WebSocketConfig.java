@@ -25,6 +25,7 @@ import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
 import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
@@ -157,6 +158,22 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
             return tokenHeaders.getFirst();
         }
         return null;
+    }
+
+    /**
+     * STOMP inbound/outbound executor. The heartbeat scheduler is also an {@code Executor},
+     * which suppresses Boot's default task executor; without this bean Boot runs voice
+     * broadcasts on that two-thread scheduler.
+     */
+    @Bean(name = {"applicationTaskExecutor", "taskExecutor"})
+    ThreadPoolTaskExecutor applicationTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(32);
+        executor.setQueueCapacity(1000);
+        executor.setThreadNamePrefix("stomp-");
+        executor.setWaitForTasksToCompleteOnShutdown(false);
+        return executor;
     }
 
     @Bean

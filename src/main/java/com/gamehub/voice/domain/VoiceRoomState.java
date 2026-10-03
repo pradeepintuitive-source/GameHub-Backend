@@ -1,6 +1,7 @@
 package com.gamehub.voice.domain;
 
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,6 +21,11 @@ public class VoiceRoomState {
     public boolean isParticipant(UUID id) { return participants.contains(id); }
     public boolean isMuted(UUID id)       { return mutedUsers.contains(id); }
     public Set<UUID> participants()       { return Collections.unmodifiableSet(participants); }
+
+    /** Stable copy of auth user ids for the presence broadcast. */
+    public Set<UUID> participantIds() {
+        return Set.copyOf(new LinkedHashSet<>(participants));
+    }
 
     public boolean join(UUID userId)  { return participants.add(userId); }
 

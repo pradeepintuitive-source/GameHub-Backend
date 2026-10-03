@@ -53,9 +53,9 @@ public class VoiceSignalingService {
         boolean added = state.join(userId);
         if (added) {
             log.info("Voice join: roomId={} userId={} total={}", roomId, userId, state.size());
-            broadcastPresence(VoicePresenceMessage.joined(roomId, state.participants(), userId));
+            broadcastPresence(VoicePresenceMessage.joined(roomId, state.participantIds(), userId));
         }
-        return state.participants();
+        return state.participantIds();
     }
 
     /**
@@ -73,7 +73,7 @@ public class VoiceSignalingService {
 
             state.leave(userId);
             log.info("Voice leave: roomId={} userId={} remaining={}", roomId, userId, state.size());
-            broadcastPresence(VoicePresenceMessage.left(roomId, state.participants(), userId));
+            broadcastPresence(VoicePresenceMessage.left(roomId, state.participantIds(), userId));
             registry.pruneIfEmpty(roomId);
         });
     }

@@ -42,19 +42,28 @@ public class VoiceStompController {
     private final VoiceSignalingService signalingService;
 
     @MessageMapping("/voice/{roomId}/join")
-    public void join(@DestinationVariable UUID roomId, Principal principal) {
+    public void join(
+            @DestinationVariable UUID roomId,
+            @Payload(required = false) VoiceJoinRequest request,
+            Principal principal) {
+        // requestId is optional. Clients send null; that must not reject the join.
         UUID userId = extractUserId(principal);
         if (userId == null) return;
         Set<UUID> participants = signalingService.joinVoiceRoom(roomId, userId);
-        log.info("VOICE JOIN: roomId={} userId={} participants={}", roomId, userId, participants.size());
+        log.info("VOICE JOIN: roomId={} userId={} participants={} requestId={}",
+                roomId, userId, participants.size(), request == null ? null : request.requestId());
     }
 
     @MessageMapping("/voice/{roomId}/leave")
-    public void leave(@DestinationVariable UUID roomId, Principal principal) {
+    public void leave(
+            @DestinationVariable UUID roomId,
+            @Payload(required = false) VoiceJoinRequest request,
+            Principal principal) {
         UUID userId = extractUserId(principal);
         if (userId == null) return;
         signalingService.leaveVoiceRoom(roomId, userId);
-        log.info("VOICE LEAVE: roomId={} userId={}", roomId, userId);
+        log.info("VOICE LEAVE: roomId={} userId={} requestId={}",
+                roomId, userId, request == null ? null : request.requestId());
     }
 
     @MessageMapping("/voice/{roomId}/signal")
@@ -86,6 +95,12 @@ public class VoiceStompController {
         log.warn("Voice action rejected: unauthenticated principal={}", principal);
         return null;
     }
+
+    /**
+     * Inbound join/leave body. {@code requestId} may be null or absent; it is never required.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record VoiceJoinRequest(String roomId, String requestId) {}
 
     /**
      * Inbound payload for mute/unmute requests.
