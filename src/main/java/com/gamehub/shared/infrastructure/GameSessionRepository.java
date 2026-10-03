@@ -10,4 +10,6 @@ public interface GameSessionRepository extends JpaRepository<GameSessionEntity, 
     List<GameSessionEntity> findByRoomIdOrderByCreatedAtDesc(UUID roomId);
 
     Optional<GameSessionEntity> findByRoomIdAndStatus(UUID roomId, com.gamehub.shared.domain.SessionStatus status);
+
+    void deleteByRoomId(UUID roomId);
 }

@@ -6,6 +6,11 @@ import com.gamehub.audit.application.AuditService;
 import com.gamehub.audit.domain.AuditType;
 import com.gamehub.common.domain.ApiException;
 import com.gamehub.common.domain.BusinessRuleViolationException;
+import com.gamehub.mafia.infrastructure.MafiaGameRepository;
+import com.gamehub.mafia.infrastructure.MafiaRoleRepository;
+import com.gamehub.mafia.infrastructure.MafiaVoteRepository;
+import com.gamehub.monopoly.infrastructure.MonopolyGameRepository;
+import com.gamehub.monopoly.infrastructure.MonopolyPropertyRepository;
 import com.gamehub.notification.application.NotificationService;
 import com.gamehub.notification.domain.NotificationMessage;
 import com.gamehub.player.application.UserService;
@@ -20,6 +25,10 @@ import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import com.gamehub.shared.application.GameEventService;
 import com.gamehub.shared.application.SaveGameService;
 import com.gamehub.shared.domain.GameEventType;
+import com.gamehub.shared.infrastructure.ChatMessageRepository;
+import com.gamehub.shared.infrastructure.GameEventRepository;
+import com.gamehub.shared.infrastructure.GameSessionEntity;
+import com.gamehub.shared.infrastructure.GameSessionRepository;
 import java.time.Instant;
 import java.util.List;
 import java.util.Random;
@@ -51,6 +60,14 @@ public class RoomService {
     private final NotificationService notificationService;
     private final com.gamehub.websocket.infrastructure.LobbyBroadcaster lobbyBroadcaster;
     private final SaveGameService saveGameService;
+    private final GameSessionRepository gameSessionRepository;
+    private final GameEventRepository gameEventRepository;
+    private final ChatMessageRepository chatMessageRepository;
+    private final MonopolyPropertyRepository monopolyPropertyRepository;
+    private final MonopolyGameRepository monopolyGameRepository;
+    private final MafiaVoteRepository mafiaVoteRepository;
+    private final MafiaRoleRepository mafiaRoleRepository;
+    private final MafiaGameRepository mafiaGameRepository;
     private final Random random = new Random();
 
     public RoomDtos.RoomResponse createRoom(GameHubUserPrincipal principal, RoomDtos.CreateRoomRequest request) {
@@ -170,19 +187,20 @@ public class RoomService {
         auditService.record(AuditType.ROOM_EVENT, roomId, room.getCurrentSessionId(), principal.userId(), "Player left room", player.getDisplayName());
         gameEventService.record(roomId, room.getCurrentSessionId(), GameEventType.PLAYER_LEFT, principal.userId(), player.getDisplayName());
 
+        List<PlayerEntity> remainingHumans = playerRepository.findByRoomIdOrderBySeatOrder(roomId).stream()
+                .filter(candidate -> !candidate.isAiControlled())
+                .toList();
+        if (remainingHumans.isEmpty()) {
+            playerRepository.findByRoomIdOrderBySeatOrder(roomId).forEach(playerRepository::delete);
+            deleteRoomAndDependencies(room);
+            broadcastRoomClosedAfterCommit(roomId);
+            return null;
+        }
+
         if (principal.userId().equals(room.getHostUserId())) {
-            List<PlayerEntity> remaining = playerRepository.findByRoomIdOrderBySeatOrder(roomId).stream()
-                    .filter(candidate -> !candidate.isAiControlled())
-                    .toList();
-            if (remaining.isEmpty()) {
-                playerRepository.findByRoomIdOrderBySeatOrder(roomId).forEach(playerRepository::delete);
-                roomRepository.delete(room);
-                broadcastRoomClosedAfterCommit(roomId);
-                return null;
-            }
-            PlayerEntity nextHost = remaining.stream()
+            PlayerEntity nextHost = remainingHumans.stream()
                     .min(java.util.Comparator.comparingInt(PlayerEntity::getSeatOrder).thenComparing(PlayerEntity::getCreatedAt))
-                    .orElse(remaining.getFirst());
+                    .orElse(remainingHumans.getFirst());
             room.setHostUserId(nextHost.getUserId());
             roomRepository.save(room);
         }
@@ -209,13 +227,15 @@ public class RoomService {
     public RoomDtos.RoomResponse closeRoom(GameHubUserPrincipal principal, UUID roomId) {
         RoomEntity room = requireRoom(roomId);
         assertHost(room, principal.userId());
+        String roomCode = room.getRoomCode();
+        UUID sessionId = room.getCurrentSessionId();
+        auditService.record(AuditType.ROOM_EVENT, roomId, sessionId, principal.userId(), "Room closed", roomCode);
+        gameEventService.record(roomId, sessionId, GameEventType.ROOM_UPDATED, principal.userId(), "Room closed");
         playerRepository.findByRoomIdOrderBySeatOrder(roomId).forEach(playerRepository::delete);
-        roomRepository.delete(room);
-        auditService.record(AuditType.ROOM_EVENT, roomId, room.getCurrentSessionId(), principal.userId(), "Room closed", room.getRoomCode());
-        gameEventService.record(roomId, room.getCurrentSessionId(), GameEventType.ROOM_UPDATED, principal.userId(), "Room closed");
+        deleteRoomAndDependencies(room);
         notificationService.sendToTopic(
             "/topic/rooms",
-            new NotificationMessage("ROOM_CLOSED", roomId, room.getCurrentSessionId(), room.getRoomCode(), Instant.now()));
+            new NotificationMessage("ROOM_CLOSED", roomId, sessionId, roomCode, Instant.now()));
         broadcastRoomClosedAfterCommit(roomId);
         return null;
     }
@@ -226,13 +246,15 @@ public class RoomService {
                 .toList();
         for (PlayerEntity player : activePlayers) {
             RoomEntity room = roomRepository.findById(player.getRoomId()).orElse(null);
-            if (room == null || room.getState() != RoomState.WAITING) {
+            if (room == null) {
                 continue;
             }
             player.setConnected(false);
             playerRepository.save(player);
-            gameEventService.record(player.getRoomId(), null, GameEventType.PLAYER_DISCONNECTED, userId, player.getDisplayName());
-            saveGameService.autoSaveCurrentSessionForRoom(player.getRoomId(), userId, "PLAYER_DISCONNECT");
+            gameEventService.record(player.getRoomId(), room.getCurrentSessionId(), GameEventType.PLAYER_DISCONNECTED, userId, player.getDisplayName());
+            if (room.getCurrentSessionId() != null) {
+                saveGameService.autoSaveCurrentSessionForRoom(player.getRoomId(), userId, "PLAYER_DISCONNECT");
+            }
             try {
                 broadcastRoomAfterCommit(player.getRoomId());
             } catch (Exception e) {
@@ -343,5 +365,30 @@ public class RoomService {
             candidate = builder.toString();
         } while (roomRepository.findByRoomCode(candidate).isPresent());
         return candidate;
+    }
+
+    /**
+     * Deletes game sessions and dependent rows before removing the room,
+     * avoiding PostgreSQL foreign-key violations.
+     */
+    private void deleteRoomAndDependencies(RoomEntity room) {
+        UUID roomId = room.getId();
+        List<GameSessionEntity> sessions = gameSessionRepository.findByRoomIdOrderByCreatedAtDesc(roomId);
+        for (GameSessionEntity session : sessions) {
+            UUID sessionId = session.getId();
+            monopolyPropertyRepository.deleteBySessionId(sessionId);
+            monopolyGameRepository.deleteBySessionId(sessionId);
+            mafiaVoteRepository.deleteBySessionId(sessionId);
+            mafiaRoleRepository.deleteBySessionId(sessionId);
+            mafiaGameRepository.deleteBySessionId(sessionId);
+            gameEventRepository.deleteBySessionId(sessionId);
+        }
+        gameEventRepository.deleteByRoomId(roomId);
+        chatMessageRepository.deleteByRoomId(roomId);
+        room.setCurrentSessionId(null);
+        roomRepository.save(room);
+        gameSessionRepository.deleteByRoomId(roomId);
+        roomRepository.delete(room);
+        logger.info("Deleted room {} and dependent game data", roomId);
     }
 }

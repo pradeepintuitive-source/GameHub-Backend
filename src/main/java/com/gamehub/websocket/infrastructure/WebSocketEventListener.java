@@ -3,6 +3,8 @@ package com.gamehub.websocket.infrastructure;
 import com.gamehub.notification.application.NotificationService;
 import com.gamehub.notification.domain.NotificationMessage;
 import com.gamehub.room.application.RoomService;
+import com.gamehub.voice.application.VoiceSignalingService;
+import com.gamehub.voice.domain.VoiceRoomRegistry;
 import com.gamehub.websocket.application.PresenceService;
 import com.gamehub.websocket.domain.WebSocketConnection;
 import java.security.Principal;
@@ -20,9 +22,11 @@ import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 @RequiredArgsConstructor
 public class WebSocketEventListener {
 
-    private final PresenceService presenceService;
-    private final RoomService roomService;
-    private final NotificationService notificationService;
+    private final PresenceService        presenceService;
+    private final RoomService            roomService;
+    private final NotificationService    notificationService;
+    private final VoiceSignalingService  voiceSignalingService;
+    private final VoiceRoomRegistry      voiceRoomRegistry;
 
     @EventListener
     public void onConnect(SessionConnectEvent event) {
@@ -47,9 +51,21 @@ public class WebSocketEventListener {
         if (connection == null) {
             return;
         }
-        roomService.markDisconnected(connection.userId());
+        UUID userId = connection.userId();
+
+        // Auto-leave all voice rooms the user was participating in when they disconnect.
+        // This ensures remaining peers clean up their RTCPeerConnection properly.
+        voiceRoomRegistry.allRoomIds().forEach(roomId ->
+                voiceRoomRegistry.find(roomId).ifPresent(state -> {
+                    if (state.isParticipant(userId)) {
+                        voiceSignalingService.leaveVoiceRoom(roomId, userId);
+                    }
+                })
+        );
+
+        roomService.markDisconnected(userId);
         notificationService.sendToUser(
-                connection.userId(),
+                userId,
                 "/queue/private",
                 new NotificationMessage(
                         "PLAYER_DISCONNECTED",

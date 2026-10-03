@@ -36,10 +36,6 @@ public final class RoomDtos {
             @NotNull AiDifficulty aiDifficulty) {
     }
 
-    public record ReadyRequest(
-            boolean ready) {
-    }
-
     public record RoomResponse(
             UUID id,
             String roomCode,

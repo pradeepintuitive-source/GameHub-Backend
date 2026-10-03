@@ -70,7 +70,13 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ErrorResponse> handleAuthentication(HttpServletRequest request, AuthenticationException exception) {
-        return build(request, HttpStatus.UNAUTHORIZED, exception.getMessage(), List.of());
+        String message = exception.getMessage();
+        if (message == null || message.isBlank() || "Full authentication is required to access this resource".equalsIgnoreCase(message)) {
+            message = "Authentication required. Please sign in.";
+        } else if (message.toLowerCase().contains("bad credentials")) {
+            message = "Incorrect password";
+        }
+        return build(request, HttpStatus.UNAUTHORIZED, message, List.of());
     }
 
     @ExceptionHandler(AccessDeniedException.class)

@@ -1,5 +1,6 @@
 package com.gamehub.security.application;
 
+import com.gamehub.common.domain.ApiException;
 import com.gamehub.common.domain.BusinessRuleViolationException;
 import com.gamehub.player.infrastructure.ProfileEntity;
 import com.gamehub.player.infrastructure.ProfileRepository;
@@ -9,15 +10,14 @@ import com.gamehub.player.infrastructure.UserEntity;
 import com.gamehub.player.infrastructure.UserRepository;
 import com.gamehub.security.api.AuthDtos;
 import com.gamehub.security.domain.UserRole;
-import com.gamehub.security.application.RefreshTokenService;
 import com.gamehub.security.infrastructure.GameHubUserDetailsService;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,7 +31,6 @@ public class AuthService {
     private final ProfileRepository profileRepository;
     private final StatisticsRepository statisticsRepository;
     private final PasswordEncoder passwordEncoder;
-    private final AuthenticationManager authenticationManager;
     private final JwtService jwtService;
     private final RefreshTokenService refreshTokenService;
     private final GameHubUserDetailsService userDetailsService;
@@ -64,10 +63,29 @@ public class AuthService {
     }
 
     public AuthDtos.AuthResponse login(AuthDtos.LoginRequest request) {
-        authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.identifier(), request.password()));
-        GameHubUserPrincipal principal = userDetailsService.loadUserByUsername(request.identifier());
-        return responseFor(principal);
+        String identifier = request.identifier() == null ? "" : request.identifier().trim();
+        if (identifier.isBlank()) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "User not found", List.of());
+        }
+
+        var userOpt = identifier.contains("@")
+                ? userRepository.findByEmail(identifier.toLowerCase())
+                        .or(() -> userRepository.findByUsername(identifier))
+                : userRepository.findByUsername(identifier)
+                        .or(() -> userRepository.findByEmail(identifier.toLowerCase()));
+
+        if (userOpt.isEmpty()) {
+            String message = identifier.contains("@") ? "Email not found" : "User not found";
+            throw new ApiException(HttpStatus.UNAUTHORIZED, message, List.of());
+        }
+
+        UserEntity user = userOpt.get();
+        if (user.getPasswordHash() == null
+                || !passwordEncoder.matches(request.password() == null ? "" : request.password(), user.getPasswordHash())) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "Incorrect password", List.of());
+        }
+
+        return responseFor(user);
     }
 
     public AuthDtos.AuthResponse refresh(AuthDtos.RefreshTokenRequest request) {

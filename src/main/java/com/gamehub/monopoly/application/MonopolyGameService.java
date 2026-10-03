@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gamehub.audit.application.AuditService;
 import com.gamehub.audit.domain.AuditType;
+import com.gamehub.common.domain.ApiException;
 import com.gamehub.common.domain.BusinessRuleViolationException;
 import com.gamehub.monopoly.api.MonopolyDtos;
 import com.gamehub.monopoly.domain.MonopolyAction;
+import com.gamehub.monopoly.domain.MonopolyActionType;
 import com.gamehub.monopoly.domain.MonopolyGameState;
 import com.gamehub.monopoly.domain.MonopolyPhase;
 import com.gamehub.monopoly.domain.Property;
@@ -21,17 +23,26 @@ import com.gamehub.monopoly.infrastructure.MonopolyPropertyEntity;
 import com.gamehub.monopoly.infrastructure.MonopolyPropertyRepository;
 import com.gamehub.notification.application.NotificationService;
 import com.gamehub.notification.domain.NotificationMessage;
+import com.gamehub.player.infrastructure.PlayerEntity;
+import com.gamehub.player.infrastructure.PlayerRepository;
+import com.gamehub.room.infrastructure.RoomEntity;
+import com.gamehub.room.infrastructure.RoomRepository;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import com.gamehub.shared.application.GameEventService;
 import com.gamehub.shared.application.SaveGameService;
 import com.gamehub.shared.domain.GameEventType;
 import com.gamehub.shared.infrastructure.GameSessionEntity;
+import com.gamehub.shared.infrastructure.GameSessionRepository;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -42,11 +53,17 @@ public class MonopolyGameService {
     private final MonopolyEngine monopolyEngine;
     private final MonopolyGameRepository monopolyGameRepository;
     private final MonopolyPropertyRepository monopolyPropertyRepository;
+    private final GameSessionRepository gameSessionRepository;
     private final ObjectMapper objectMapper;
     private final SaveGameService saveGameService;
     private final AuditService auditService;
     private final GameEventService gameEventService;
     private final NotificationService notificationService;
+    private final RoomRepository roomRepository;
+    private final PlayerRepository playerRepository;
+
+    /** Session → tile where buy/auction was declined (unsold auction). Cleared on roll / end turn. */
+    private final Map<UUID, Integer> declinedPurchaseBySession = new ConcurrentHashMap<>();
 
     @Transactional
     public MonopolyGameState startSession(GameSessionEntity session, UUID roomId, List<UUID> playerIds, UUID actorUserId) {
@@ -83,6 +100,9 @@ public class MonopolyGameService {
             GameHubUserPrincipal principal,
             UUID actorPlayerId,
             MonopolyDtos.MonopolyActionRequest request) {
+        if (request.type() == MonopolyActionType.BANK_ADJUST || request.type() == MonopolyActionType.BANK_TRANSFER) {
+            assertRoomHost(roomId, principal.userId());
+        }
         MonopolyGameState currentState = read(session.getStatePayload());
         MonopolyAction action = new MonopolyAction(
                 actorPlayerId,
@@ -91,10 +111,14 @@ public class MonopolyGameService {
                 request.targetPlayerId(),
                 request.amount(),
                 request.metadata() == null ? Map.of() : request.metadata());
-        MonopolyGameState updatedState = monopolyEngine.processAction(currentState, action);
+        MonopolyGameState updatedState = withNamedLogs(roomId, monopolyEngine.processAction(currentState, action));
         persistState(session, updatedState);
         updateGameRow(session.getId(), updatedState);
         syncProperties(updatedState);
+
+        if (request.type() == MonopolyActionType.ROLL_DICE || request.type() == MonopolyActionType.END_TURN) {
+            declinedPurchaseBySession.remove(session.getId());
+        }
 
         GameEventType eventType = switch (request.type()) {
             case ROLL_DICE, END_TURN -> GameEventType.PLAYER_MOVED;
@@ -113,6 +137,43 @@ public class MonopolyGameService {
             saveGameService.autoSave(session.getId(), principal.userId(), "ACTION");
         }
         return updatedState;
+    }
+
+    /**
+     * Ends an auction with no purchase: property stays unowned. Appends a game log and notifies clients.
+     */
+    @Transactional
+    public MonopolyGameState recordAuctionUnsold(UUID roomId, GameSessionEntity session, int tilePosition) {
+        MonopolyGameState state = read(session.getStatePayload());
+        String tileName = state.board().tileAt(tilePosition).name();
+        List<String> log = new ArrayList<>(state.log());
+        // Avoid duplicate log lines if the close path is invoked more than once.
+        String unsoldLine = "Auction ended with no bids — " + tileName + " remains with the bank.";
+        if (log.isEmpty() || !unsoldLine.equals(log.get(log.size() - 1))) {
+            log.add(unsoldLine);
+        }
+        declinedPurchaseBySession.put(session.getId(), tilePosition);
+        MonopolyGameState updated = withNamedLogs(
+                roomId,
+                new MonopolyGameState(
+                        state.sessionId(),
+                        state.phase(),
+                        state.currentPlayerId(),
+                        state.currentTurn(),
+                        state.lastDiceTotal(),
+                        state.board(),
+                        state.assets(),
+                        state.owners(),
+                        state.developments(),
+                        state.mortgagedTiles(),
+                        log,
+                        state.activeEvent()));
+        persistState(session, updated);
+        updateGameRow(session.getId(), updated);
+        notificationService.sendToTopic(
+                "/topic/game/" + roomId,
+                new NotificationMessage("AUCTION", roomId, session.getId(), toResponse(updated), Instant.now()));
+        return updated;
     }
 
     @Transactional
@@ -156,11 +217,70 @@ public class MonopolyGameService {
                 state.owners(),
                 developments,
                 state.mortgagedTiles(),
-                state.log());
+                state.log(),
+                state.activeEvent() == null
+                        ? null
+                        : new MonopolyDtos.IndianEventResponse(
+                                state.activeEvent().id(),
+                                state.activeEvent().title(),
+                                state.activeEvent().description(),
+                                state.activeEvent().expiresOnTurn()),
+                declinedPurchaseBySession.get(state.sessionId()));
+    }
+
+    private void assertRoomHost(UUID roomId, UUID userId) {
+        RoomEntity room = roomRepository.findById(roomId)
+                .orElseThrow(() -> new BusinessRuleViolationException("Room not found"));
+        if (!room.getHostUserId().equals(userId)) {
+            throw new ApiException(
+                    HttpStatus.FORBIDDEN,
+                    "Only the room host can use Bank Manager",
+                    List.of());
+        }
+    }
+
+    private MonopolyGameState withNamedLogs(UUID roomId, MonopolyGameState state) {
+        Map<String, String> names = new HashMap<>();
+        for (PlayerEntity player : playerRepository.findByRoomIdOrderBySeatOrder(roomId)) {
+            String display = player.getDisplayName() == null || player.getDisplayName().isBlank()
+                    ? player.getId().toString()
+                    : player.getDisplayName();
+            names.put(player.getId().toString(), display);
+            if (player.getUserId() != null) {
+                names.put(player.getUserId().toString(), display);
+            }
+        }
+        if (names.isEmpty()) {
+            return state;
+        }
+        List<String> rewritten = new ArrayList<>(state.log().size());
+        for (String line : state.log()) {
+            String next = line;
+            for (Map.Entry<String, String> entry : names.entrySet()) {
+                next = next.replace(entry.getKey(), entry.getValue());
+            }
+            rewritten.add(next);
+        }
+        return new MonopolyGameState(
+                state.sessionId(),
+                state.phase(),
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                state.assets(),
+                state.owners(),
+                state.developments(),
+                state.mortgagedTiles(),
+                rewritten,
+                state.activeEvent());
     }
 
     private void persistState(GameSessionEntity session, MonopolyGameState state) {
+        // Session is often detached when called from STOMP (loaded in a prior read-only TX).
+        // Explicit save is required so GET /api/games/{id} sees the updated state_payload on refresh.
         session.setStatePayload(write(state));
+        gameSessionRepository.save(session);
     }
 
     private void updateGameRow(UUID sessionId, MonopolyGameState state) {

@@ -1,13 +1,15 @@
 package com.gamehub.security.application;
 
-import com.gamehub.common.domain.BusinessRuleViolationException;
+import com.gamehub.common.domain.ApiException;
 import com.gamehub.security.infrastructure.RefreshTokenEntity;
 import com.gamehub.security.infrastructure.RefreshTokenRepository;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,7 +37,10 @@ public class RefreshTokenService {
         return refreshTokenRepository.findByToken(refreshToken)
                 .filter(entity -> !entity.isRevoked())
                 .filter(entity -> entity.getExpiresAt().isAfter(Instant.now()))
-                .orElseThrow(() -> new BusinessRuleViolationException("Refresh token is invalid or expired"));
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.UNAUTHORIZED,
+                        "Session expired. Please sign in again.",
+                        List.of()));
     }
 
     public void revokeRefreshToken(RefreshTokenEntity refreshToken) {

@@ -90,11 +90,4 @@ public class RoomController {
         return roomService.addAiPlayer(requirePrincipal(principal), roomId, request);
     }
 
-    @PostMapping("/{roomId}/ready")
-    public RoomDtos.RoomResponse ready(
-            @PathVariable UUID roomId,
-            @AuthenticationPrincipal GameHubUserPrincipal principal,
-            @Valid @RequestBody RoomDtos.ReadyRequest request) {
-        return roomService.setReady(requirePrincipal(principal), roomId, request.ready());
-    }
 }

@@ -31,7 +31,8 @@ public class SecurityConfig {
             HttpSecurity http,
             JwtAuthenticationFilter jwtAuthenticationFilter,
             DaoAuthenticationProvider daoAuthenticationProvider,
-            CorsConfigurationSource corsConfigurationSource) throws Exception {
+            CorsConfigurationSource corsConfigurationSource,
+            JsonAuthHandlers jsonAuthHandlers) throws Exception {
         http
             .csrf(csrf -> csrf.disable())
             .cors(cors -> cors.configurationSource(corsConfigurationSource))
@@ -61,6 +62,9 @@ public class SecurityConfig {
     .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
     .anyRequest().authenticated()
                 )
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint(jsonAuthHandlers)
+                        .accessDeniedHandler(jsonAuthHandlers))
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }

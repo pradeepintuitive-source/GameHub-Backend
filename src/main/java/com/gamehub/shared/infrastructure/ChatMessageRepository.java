@@ -7,4 +7,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface ChatMessageRepository extends JpaRepository<ChatMessageEntity, UUID> {
 
     List<ChatMessageEntity> findTop100ByRoomIdOrderByCreatedAtAsc(UUID roomId);
+
+    void deleteByRoomId(UUID roomId);
 }

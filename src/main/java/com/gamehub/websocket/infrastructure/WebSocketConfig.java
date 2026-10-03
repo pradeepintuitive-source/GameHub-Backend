@@ -1,12 +1,16 @@
 package com.gamehub.websocket.infrastructure;
 
 import com.gamehub.security.application.JwtService;
+import com.gamehub.security.infrastructure.GameHubAuthenticationToken;
 import com.gamehub.security.infrastructure.GameHubUserDetailsService;
+import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import java.security.Principal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -41,6 +45,7 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 @Configuration
 @EnableWebSocketMessageBroker
 @RequiredArgsConstructor
+@Slf4j
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtHandshakeInterceptor jwtHandshakeInterceptor;
@@ -49,11 +54,6 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Value("${gamehub.websocket.allowed-origins:*}")
     private String allowedOrigins;
-
-    @Override
-    public void configureClientInboundChannel(ChannelRegistration registration) {
-        registration.interceptors(stompAuthChannelInterceptor());
-    }
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
@@ -106,18 +106,35 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
                 Principal existingPrincipal = accessor.getUser();
                 if (existingPrincipal != null) {
+                    log.info(
+                            "CONNECT already authenticated: principalClass={} principalName={} sessionId={}",
+                            existingPrincipal.getClass().getName(),
+                            existingPrincipal.getName(),
+                            accessor.getSessionId());
                     return message;
                 }
 
                 Map<String, Object> sessionAttributes = accessor.getSessionAttributes();
                 if (sessionAttributes != null && sessionAttributes.get("userId") != null) {
-                    accessor.setUser(() -> sessionAttributes.get("userId").toString());
+                    UUID userId = UUID.fromString(sessionAttributes.get("userId").toString());
+                    GameHubUserPrincipal userPrincipal = userDetailsService.loadUserById(userId);
+                    accessor.setUser(new GameHubAuthenticationToken(userPrincipal));
+                    log.info(
+                            "CONNECT setUser from sessionAttributes: principalName={} sessionId={}",
+                            accessor.getUser().getName(),
+                            accessor.getSessionId());
                     return MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders());
                 }
 
                 String token = resolveToken(accessor);
                 if (token != null && jwtService.isValid(token)) {
-                    accessor.setUser(() -> jwtService.extractUserId(token).toString());
+                    GameHubUserPrincipal userPrincipal =
+                            userDetailsService.loadUserById(jwtService.extractUserId(token));
+                    accessor.setUser(new GameHubAuthenticationToken(userPrincipal));
+                    log.info(
+                            "CONNECT setUser from token: principalName={} sessionId={}",
+                            accessor.getUser().getName(),
+                            accessor.getSessionId());
                     return MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders());
                 }
 
@@ -149,6 +166,54 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         scheduler.setThreadNamePrefix("ws-heartbeat-");
         scheduler.initialize();
         return scheduler;
+    }
+
+    @Bean
+    ChannelInterceptor stompInboundLoggingInterceptor() {
+        return new ChannelInterceptor() {
+            @Override
+            public Message<?> preSend(Message<?> message, MessageChannel channel) {
+                StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+                if (accessor != null) {
+                    log.info("STOMP INBOUND: command={} destination={} sessionId={} principal={} principalName={}",
+                            accessor.getCommand(),
+                            accessor.getDestination(),
+                            accessor.getSessionId(),
+                            accessor.getUser(),
+                            accessor.getUser() != null ? accessor.getUser().getName() : null);
+                }
+                return message;
+            }
+        };
+    }
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(stompInboundLoggingInterceptor(), stompAuthChannelInterceptor());
+    }
+
+    @Bean
+    ChannelInterceptor stompOutboundLoggingInterceptor() {
+        return new ChannelInterceptor() {
+            @Override
+            public Message<?> preSend(Message<?> message, MessageChannel channel) {
+                StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+                if (accessor != null && accessor.getCommand() == StompCommand.MESSAGE) {
+                    log.info("STOMP OUTBOUND MESSAGE: destination={} sessionId={} principal={} principalName={} command={}",
+                            accessor.getDestination(),
+                            accessor.getSessionId(),
+                            accessor.getUser(),
+                            accessor.getUser() != null ? accessor.getUser().getName() : null,
+                            accessor.getCommand());
+                }
+                return message;
+            }
+        };
+    }
+
+    @Override
+    public void configureClientOutboundChannel(ChannelRegistration registration) {
+        registration.interceptors(stompOutboundLoggingInterceptor());
     }
 
     @Bean

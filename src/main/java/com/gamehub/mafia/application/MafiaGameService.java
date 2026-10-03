@@ -22,6 +22,7 @@ import com.gamehub.shared.application.GameEventService;
 import com.gamehub.shared.application.SaveGameService;
 import com.gamehub.shared.domain.GameEventType;
 import com.gamehub.shared.infrastructure.GameSessionEntity;
+import com.gamehub.shared.infrastructure.GameSessionRepository;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -40,6 +41,7 @@ public class MafiaGameService {
     private final MafiaGameRepository mafiaGameRepository;
     private final MafiaRoleRepository mafiaRoleRepository;
     private final MafiaVoteRepository mafiaVoteRepository;
+    private final GameSessionRepository gameSessionRepository;
     private final ObjectMapper objectMapper;
     private final SaveGameService saveGameService;
     private final AuditService auditService;
@@ -50,6 +52,7 @@ public class MafiaGameService {
     public MafiaGameState startSession(GameSessionEntity session, UUID roomId, List<UUID> playerIds, UUID actorUserId) {
         MafiaGameState state = mafiaEngine.startGame(session.getId(), playerIds);
         session.setStatePayload(write(state));
+        gameSessionRepository.save(session);
 
         MafiaGameEntity entity = new MafiaGameEntity();
         entity.setId(UUID.randomUUID());
@@ -143,6 +146,7 @@ public class MafiaGameService {
             String auditMessage,
             GameEventType eventType) {
         session.setStatePayload(write(updatedState));
+        gameSessionRepository.save(session);
         MafiaGameEntity gameEntity = mafiaGameRepository.findBySessionId(session.getId())
                 .orElseThrow(() -> new BusinessRuleViolationException("Mafia row missing"));
         gameEntity.setPhase(updatedState.phase());

@@ -7,4 +7,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface GameEventRepository extends JpaRepository<GameEventEntity, UUID> {
 
     List<GameEventEntity> findTop100ByRoomIdOrderByOccurredAtDesc(UUID roomId);
+
+    void deleteByRoomId(UUID roomId);
+
+    void deleteBySessionId(UUID sessionId);
 }

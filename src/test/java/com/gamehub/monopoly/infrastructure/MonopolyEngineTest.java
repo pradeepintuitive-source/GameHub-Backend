@@ -30,7 +30,20 @@ class MonopolyEngineTest {
         assertThat(state.phase()).isEqualTo(MonopolyPhase.WAITING_FOR_ROLL);
         assertThat(state.currentPlayerId()).isEqualTo(playerOne);
         assertThat(state.assets()).hasSize(2);
-        assertThat(state.assets().get(playerOne).cash()).isEqualTo(1500);
+        assertThat(state.assets().get(playerOne).cash()).isEqualTo(15000);
+    }
+
+    @Test
+    void startGameShouldUseIndiaEditionEconomyForFourPlayers() {
+        UUID playerOne = UUID.randomUUID();
+        UUID playerTwo = UUID.randomUUID();
+        UUID playerThree = UUID.randomUUID();
+        UUID playerFour = UUID.randomUUID();
+
+        MonopolyGameState state = monopolyEngine.startGame(UUID.randomUUID(), List.of(playerOne, playerTwo, playerThree, playerFour));
+
+        assertThat(state.board().tileAt(1).name()).isEqualTo("Manglore");
+        assertThat(state.assets().get(playerOne).cash()).isEqualTo(15000);
     }
 
     @Test
@@ -38,8 +51,8 @@ class MonopolyEngineTest {
         UUID playerOne = UUID.randomUUID();
         UUID playerTwo = UUID.randomUUID();
         Map<UUID, PlayerAsset> assets = new HashMap<>();
-        assets.put(playerOne, new PlayerAsset(playerOne, 1500, 1, false, 0, new HashSet<>()));
-        assets.put(playerTwo, new PlayerAsset(playerTwo, 1500, 0, false, 0, new HashSet<>()));
+        assets.put(playerOne, new PlayerAsset(playerOne, 15000, 1, false, 0, new HashSet<>()));
+        assets.put(playerTwo, new PlayerAsset(playerTwo, 15000, 0, false, 0, new HashSet<>()));
 
         MonopolyGameState state = new MonopolyGameState(
                 UUID.randomUUID(),
@@ -52,14 +65,14 @@ class MonopolyEngineTest {
                 new HashMap<>(),
                 new HashMap<>(),
                 new HashSet<>(),
-                List.of("Landed on Mediterranean Avenue"));
+                List.of("Landed on Manglore"));
 
         MonopolyGameState updated = monopolyEngine.processAction(
                 state,
                 new MonopolyAction(playerOne, MonopolyActionType.BUY_PROPERTY, null, null, null, Map.of()));
 
         assertThat(updated.owners()).containsEntry(1, playerOne);
-        assertThat(updated.assets().get(playerOne).cash()).isEqualTo(1440);
+        assertThat(updated.assets().get(playerOne).cash()).isEqualTo(14400);
         assertThat(updated.assets().get(playerOne).ownedTilePositions()).contains(1);
     }
 
@@ -68,8 +81,8 @@ class MonopolyEngineTest {
         UUID playerOne = UUID.randomUUID();
         UUID playerTwo = UUID.randomUUID();
         Map<UUID, PlayerAsset> assets = new HashMap<>();
-        assets.put(playerOne, new PlayerAsset(playerOne, 1500, 0, false, 0, Set.of()));
-        assets.put(playerTwo, new PlayerAsset(playerTwo, 1500, 0, false, 0, Set.of()));
+        assets.put(playerOne, new PlayerAsset(playerOne, 15000, 0, false, 0, Set.of()));
+        assets.put(playerTwo, new PlayerAsset(playerTwo, 15000, 0, false, 0, Set.of()));
 
         MonopolyGameState state = new MonopolyGameState(
                 UUID.randomUUID(),

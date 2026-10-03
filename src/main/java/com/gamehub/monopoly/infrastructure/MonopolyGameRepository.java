@@ -7,4 +7,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface MonopolyGameRepository extends JpaRepository<MonopolyGameEntity, UUID> {
 
     Optional<MonopolyGameEntity> findBySessionId(UUID sessionId);
+
+    void deleteBySessionId(UUID sessionId);
 }

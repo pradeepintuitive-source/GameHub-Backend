@@ -31,7 +31,17 @@ public final class MonopolyDtos {
             Map<Integer, UUID> owners,
             Map<Integer, DevelopmentResponse> developments,
             Set<Integer> mortgagedTiles,
-            List<String> log) {
+            List<String> log,
+            IndianEventResponse activeEvent,
+            /** Tile whose buy offer was closed (e.g. auction ended unsold); null if none. */
+            Integer declinedPurchaseTile) {
+    }
+
+    public record IndianEventResponse(
+            String id,
+            String title,
+            String description,
+            int expiresOnTurn) {
     }
 
     public record AssetResponse(

@@ -1,6 +1,7 @@
 package com.gamehub.security.infrastructure;
 
 import com.gamehub.security.domain.UserRole;
+import java.security.Principal;
 import java.util.Collection;
 import java.util.Set;
 import java.util.UUID;
@@ -13,7 +14,7 @@ public record GameHubUserPrincipal(
         String username,
         String password,
         boolean guest,
-        Set<UserRole> roles) implements UserDetails {
+        Set<UserRole> roles) implements UserDetails, Principal {
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
@@ -30,6 +31,11 @@ public record GameHubUserPrincipal(
     @Override
     public String getUsername() {
         return username;
+    }
+
+    @Override
+    public String getName() {
+        return userId.toString();
     }
 
     @Override

@@ -13,5 +13,7 @@ public enum MonopolyActionType {
     USE_JAIL_CARD,
     TRADE,
     AUCTION,
+    BANK_ADJUST,
+    BANK_TRANSFER,
     END_TURN
 }

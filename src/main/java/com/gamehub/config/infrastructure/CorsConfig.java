@@ -18,6 +18,14 @@ public class CorsConfig {
     @Value("${gamehub.websocket.allowed-origins:*}")
     private String allowedOrigins;
 
+    /**
+     * SockJS XHR transports always set {@code xhr.withCredentials = true}.
+     * Credentialed browser requests require {@code Access-Control-Allow-Credentials: true}
+     * or the browser reports a generic CORS error even when Allow-Origin is present.
+     */
+    @Value("${gamehub.enable-cors-credentials:false}")
+    private boolean enableCorsCredentials;
+
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
@@ -29,14 +37,17 @@ public class CorsConfig {
             patterns = List.of("*");
         }
 
+        // Credentials + wildcard origin is invalid in browsers; fall back to non-credentialed CORS.
+        boolean allowCredentials = enableCorsCredentials && !patterns.contains("*");
+
         config.setAllowedOriginPatterns(patterns);
         config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"));
         config.setAllowedHeaders(Arrays.asList("*"));
         config.setExposedHeaders(Arrays.asList("Authorization", "Content-Type", "X-Requested-With"));
-        config.setAllowCredentials(false);
+        config.setAllowCredentials(allowCredentials);
 
         System.out.println("CorsConfig: allowedOrigins=" + patterns);
-        System.out.println("CorsConfig: allowCredentials=false");
+        System.out.println("CorsConfig: allowCredentials=" + allowCredentials);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         // Apply to all paths including SockJS endpoints

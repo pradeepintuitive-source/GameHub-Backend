@@ -2,6 +2,8 @@ package com.gamehub.security.application;
 
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
@@ -54,8 +56,23 @@ public class JwtService {
     }
 
     public boolean isValid(String token) {
-        Claims claims = parseClaims(token);
-        return claims.getExpiration().after(new Date());
+        try {
+            Claims claims = parseClaims(token);
+            return claims.getExpiration().after(new Date());
+        } catch (JwtException | IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    public boolean isExpired(String token) {
+        try {
+            parseClaims(token);
+            return false;
+        } catch (ExpiredJwtException ex) {
+            return true;
+        } catch (JwtException | IllegalArgumentException ex) {
+            return false;
+        }
     }
 
     private Claims parseClaims(String token) {
