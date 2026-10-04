@@ -337,6 +337,9 @@ public class AuctionService {
     private void settle(Auction a) {
         cancelTimeout(a);
         UUID sessionId = a.sessionId;
+        // Drop the live auction before the settlement broadcast, so that
+        // snapshot does not paint the auction panel back open.
+        auctions.remove(sessionId);
 
         try {
             GameSessionEntity session = gameSessionService.requireSession(sessionId);
@@ -363,7 +366,6 @@ public class AuctionService {
         } catch (Exception ex) {
             log.error("Auction settlement failed for session {}: {}", sessionId, ex.getMessage(), ex);
         } finally {
-            auctions.remove(sessionId);
             broadcastAuctionNull(a.roomId, sessionId);
         }
     }
@@ -420,25 +422,17 @@ public class AuctionService {
     // -----------------------------------------------------------------------
 
     private void broadcastUpdate(Auction a) {
-        Map<String, Object> outerPayload = new LinkedHashMap<>();
-        outerPayload.put("sessionId", a.sessionId);
-        outerPayload.put("roomId", a.roomId);
-        outerPayload.put("payload", toPayload(a));
-
+        // NotificationMessage already has a payload field. Nesting another
+        // payload here made clients read an empty wrapper (GO, no bidders).
         notificationService.sendToTopic(
                 "/topic/game/" + a.roomId,
-                new NotificationMessage("AUCTION_UPDATE", a.roomId, a.sessionId, outerPayload, Instant.now()));
+                new NotificationMessage("AUCTION_UPDATE", a.roomId, a.sessionId, toPayload(a), Instant.now()));
     }
 
     private void broadcastAuctionNull(UUID roomId, UUID sessionId) {
-        Map<String, Object> outerPayload = new LinkedHashMap<>();
-        outerPayload.put("sessionId", sessionId);
-        outerPayload.put("roomId", roomId);
-        outerPayload.put("payload", null);
-
         notificationService.sendToTopic(
                 "/topic/game/" + roomId,
-                new NotificationMessage("AUCTION_UPDATE", roomId, sessionId, outerPayload, Instant.now()));
+                new NotificationMessage("AUCTION_UPDATE", roomId, sessionId, null, Instant.now()));
     }
 
     // -----------------------------------------------------------------------
