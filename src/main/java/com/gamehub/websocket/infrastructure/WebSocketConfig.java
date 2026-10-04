@@ -25,8 +25,15 @@ import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.messaging.support.MessageHeaderAccessor;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.messaging.converter.DefaultContentTypeResolver;
+import org.springframework.messaging.converter.MappingJackson2MessageConverter;
+import org.springframework.messaging.converter.MessageConverter;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.util.MimeTypeUtils;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
 import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
@@ -55,6 +62,31 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Value("${gamehub.websocket.allowed-origins:*}")
     private String allowedOrigins;
+
+    /**
+     * Wire a shared Jackson ObjectMapper into the STOMP message converter so that:
+     * <ul>
+     *   <li>{@code Instant} fields serialize as ISO-8601 strings, not numeric arrays.</li>
+     *   <li>STOMP messages use the same serialization settings as the REST API.</li>
+     * </ul>
+     * Returns {@code false} so Spring keeps its default converters
+     * (e.g. {@code StringMessageConverter}) alongside this one.
+     */
+    @Override
+    public boolean configureMessageConverters(List<MessageConverter> converters) {
+        DefaultContentTypeResolver resolver = new DefaultContentTypeResolver();
+        resolver.setDefaultMimeType(MimeTypeUtils.APPLICATION_JSON);
+
+        ObjectMapper mapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+        MappingJackson2MessageConverter converter = new MappingJackson2MessageConverter();
+        converter.setObjectMapper(mapper);
+        converter.setContentTypeResolver(resolver);
+        converters.add(converter);
+        return false;
+    }
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {

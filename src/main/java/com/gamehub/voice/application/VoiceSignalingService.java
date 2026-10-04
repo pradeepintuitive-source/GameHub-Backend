@@ -51,10 +51,12 @@ public class VoiceSignalingService {
     public Set<UUID> joinVoiceRoom(UUID roomId, UUID userId) {
         VoiceRoomState state = registry.getOrCreate(roomId);
         boolean added = state.join(userId);
-        if (added) {
-            log.info("Voice join: roomId={} userId={} total={}", roomId, userId, state.size());
-            broadcastPresence(VoicePresenceMessage.joined(roomId, state.participantIds(), userId));
-        }
+        log.info("Voice join: roomId={} userId={} added={} total={}", roomId, userId, added, state.size());
+        
+        // Always broadcast presence even if already added. Prevents silent failures on fast page reloads
+        // or when opening multiple tabs with the same user during local testing.
+        broadcastPresence(VoicePresenceMessage.joined(roomId, state.participantIds(), userId));
+        
         return state.participantIds();
     }
 
