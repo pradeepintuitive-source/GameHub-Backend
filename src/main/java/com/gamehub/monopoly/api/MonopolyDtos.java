@@ -34,7 +34,14 @@ public final class MonopolyDtos {
             List<String> log,
             IndianEventResponse activeEvent,
             /** Tile whose buy offer was closed (e.g. auction ended unsold); null if none. */
-            Integer declinedPurchaseTile) {
+            Integer declinedPurchaseTile,
+            /**
+             * Live auction state, if an auction is currently in progress for this session.
+             * Clients use {@code turnDeadlineAt} (epoch millis) to show the remaining time
+             * without resetting to a fresh 20-second window on page refresh.
+             * Null when no auction is active.
+             */
+            Map<String, Object> auction) {
     }
 
     public record IndianEventResponse(

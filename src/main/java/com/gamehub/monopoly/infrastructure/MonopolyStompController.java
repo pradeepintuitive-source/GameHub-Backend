@@ -1,6 +1,7 @@
 package com.gamehub.monopoly.infrastructure;
 
 import com.gamehub.monopoly.api.MonopolyDtos;
+import com.gamehub.monopoly.application.AuctionService;
 import com.gamehub.monopoly.application.MonopolyGameService;
 import com.gamehub.monopoly.domain.MonopolyActionType;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
@@ -21,6 +22,7 @@ public class MonopolyStompController {
     private final MonopolyGameService monopolyGameService;
     private final GameSessionService gameSessionService;
     private final ActionAckService actionAckService;
+    private final AuctionService auctionService;
 
     public static record MonopolyActionMessage(
             String requestId,
@@ -45,6 +47,20 @@ public class MonopolyStompController {
         try {
             var session = gameSessionService.requireSession(sessionId);
             UUID actorPlayerId = gameSessionService.resolveActorPlayerId(session.getRoomId(), userPrincipal.userId());
+
+            // Guard: reject main-turn actions (other than BANK_ADJUST/BANK_TRANSFER) while an auction is active.
+            // Auction has its own current-bidder logic; the main-turn engine must not run concurrently.
+            MonopolyActionType actionType = MonopolyActionType.valueOf(msg.type());
+            boolean isBankAction = actionType == MonopolyActionType.BANK_ADJUST
+                    || actionType == MonopolyActionType.BANK_TRANSFER;
+            if (!isBankAction && auctionService.hasActiveAuction(sessionId)) {
+                actionAckService.sendAck(userPrincipal.userId(), msg.requestId(), msg.type(), false,
+                        "AUCTION_ACTIVE",
+                        "An auction is in progress — use the auction channel (/app/games/{id}/auction)",
+                        Map.of());
+                return;
+            }
+
             UUID targetPlayerId = null;
             if (msg.targetPlayerId() != null) {
                 try {
@@ -56,7 +72,7 @@ public class MonopolyStompController {
             }
 
             MonopolyDtos.MonopolyActionRequest request = new MonopolyDtos.MonopolyActionRequest(
-                    MonopolyActionType.valueOf(msg.type()),
+                    actionType,
                     msg.tilePosition(),
                     targetPlayerId,
                     msg.amount(),
@@ -64,7 +80,7 @@ public class MonopolyStompController {
 
             monopolyGameService.processAction(session.getRoomId(), session, userPrincipal, actorPlayerId, request);
             actionAckService.sendAck(userPrincipal.userId(), msg.requestId(), msg.type(), true, null, null, Map.of());
-            
+
         } catch (IllegalArgumentException ex) {
             actionAckService.sendAck(userPrincipal.userId(), msg.requestId(), msg.type(), false, "INVALID_REQUEST", ex.getMessage(), Map.of());
         } catch (Exception ex) {
@@ -72,3 +88,4 @@ public class MonopolyStompController {
         }
     }
 }
+

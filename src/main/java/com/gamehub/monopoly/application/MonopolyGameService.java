@@ -42,6 +42,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -61,6 +63,14 @@ public class MonopolyGameService {
     private final NotificationService notificationService;
     private final RoomRepository roomRepository;
     private final PlayerRepository playerRepository;
+
+    /**
+     * Injected lazily to break the circular dependency:
+     * MonopolyGameService ← AuctionService ← MonopolyGameService.
+     */
+    @Autowired
+    @Lazy
+    private AuctionService auctionService;
 
     /** Session → tile where buy/auction was declined (unsold auction). Cleared on roll / end turn. */
     private final Map<UUID, Integer> declinedPurchaseBySession = new ConcurrentHashMap<>();
@@ -207,6 +217,15 @@ public class MonopolyGameService {
         state.developments().forEach((position, development) -> developments.put(position, new MonopolyDtos.DevelopmentResponse(
                 development.houses(),
                 development.hotel())));
+
+        // Include live auction so clients that refresh mid-auction get turnDeadlineAt without reset.
+        Map<String, Object> auctionPayload = null;
+        if (auctionService != null) {
+            auctionPayload = auctionService.findAuction(state.sessionId())
+                    .map(auctionService::toPayload)
+                    .orElse(null);
+        }
+
         return new MonopolyDtos.MonopolyStateResponse(
                 state.sessionId(),
                 state.phase(),
@@ -225,7 +244,8 @@ public class MonopolyGameService {
                                 state.activeEvent().title(),
                                 state.activeEvent().description(),
                                 state.activeEvent().expiresOnTurn()),
-                declinedPurchaseBySession.get(state.sessionId()));
+                declinedPurchaseBySession.get(state.sessionId()),
+                auctionPayload);
     }
 
     private void assertRoomHost(UUID roomId, UUID userId) {
