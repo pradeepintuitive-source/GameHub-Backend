@@ -11,6 +11,8 @@ import com.gamehub.monopoly.domain.MonopolyAction;
 import com.gamehub.monopoly.domain.MonopolyActionType;
 import com.gamehub.monopoly.domain.MonopolyGameState;
 import com.gamehub.monopoly.domain.MonopolyPhase;
+import com.gamehub.monopoly.domain.PendingDebt;
+import com.gamehub.monopoly.domain.PendingSale;
 import com.gamehub.monopoly.domain.Property;
 import com.gamehub.monopoly.domain.PropertyDevelopment;
 import com.gamehub.monopoly.domain.Railroad;
@@ -25,6 +27,7 @@ import com.gamehub.notification.application.NotificationService;
 import com.gamehub.notification.domain.NotificationMessage;
 import com.gamehub.player.infrastructure.PlayerEntity;
 import com.gamehub.player.infrastructure.PlayerRepository;
+import com.gamehub.room.domain.PlayMode;
 import com.gamehub.room.infrastructure.RoomEntity;
 import com.gamehub.room.infrastructure.RoomRepository;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
@@ -114,8 +117,9 @@ public class MonopolyGameService {
             assertRoomHost(roomId, principal.userId());
         }
         MonopolyGameState currentState = read(session.getStatePayload());
+        UUID actor = actorForDebt(roomId, principal, currentState, request, actorPlayerId);
         MonopolyAction action = new MonopolyAction(
-                actorPlayerId,
+                actor,
                 request.type(),
                 request.tilePosition(),
                 request.targetPlayerId(),
@@ -163,21 +167,10 @@ public class MonopolyGameService {
             log.add(unsoldLine);
         }
         declinedPurchaseBySession.put(session.getId(), tilePosition);
-        MonopolyGameState updated = withNamedLogs(
-                roomId,
-                new MonopolyGameState(
-                        state.sessionId(),
-                        state.phase(),
-                        state.currentPlayerId(),
-                        state.currentTurn(),
-                        state.lastDiceTotal(),
-                        state.board(),
-                        state.assets(),
-                        state.owners(),
-                        state.developments(),
-                        state.mortgagedTiles(),
-                        log,
-                        state.activeEvent()));
+        MonopolyGameState updated = withNamedLogs(roomId, state.withLog(log));
+        if (updated.phase() == MonopolyPhase.WAITING_FOR_DECISION) {
+            updated = withNamedLogs(roomId, monopolyEngine.handOver(updated));
+        }
         persistState(session, updated);
         updateGameRow(session.getId(), updated);
         notificationService.sendToTopic(
@@ -212,7 +205,8 @@ public class MonopolyGameService {
                 asset.position(),
                 asset.inJail(),
                 asset.jailTurns(),
-                asset.ownedTilePositions())));
+                asset.ownedTilePositions(),
+                state.bankruptPlayerIds().contains(playerId))));
         Map<Integer, MonopolyDtos.DevelopmentResponse> developments = new LinkedHashMap<>();
         state.developments().forEach((position, development) -> developments.put(position, new MonopolyDtos.DevelopmentResponse(
                 development.houses(),
@@ -245,7 +239,10 @@ public class MonopolyGameService {
                                 state.activeEvent().description(),
                                 state.activeEvent().expiresOnTurn()),
                 declinedPurchaseBySession.get(state.sessionId()),
-                auctionPayload);
+                auctionPayload,
+                toDebt(state.pendingDebt()),
+                toSale(state.pendingSale()),
+                state.phase() == MonopolyPhase.ENDED ? state.currentPlayerId() : null);
     }
 
     private void assertRoomHost(UUID roomId, UUID userId) {
@@ -281,19 +278,46 @@ public class MonopolyGameService {
             }
             rewritten.add(next);
         }
-        return new MonopolyGameState(
-                state.sessionId(),
-                state.phase(),
-                state.currentPlayerId(),
-                state.currentTurn(),
-                state.lastDiceTotal(),
-                state.board(),
-                state.assets(),
-                state.owners(),
-                state.developments(),
-                state.mortgagedTiles(),
-                rewritten,
-                state.activeEvent());
+        return state.withLog(rewritten);
+    }
+
+    private UUID actorForDebt(
+            UUID roomId,
+            GameHubUserPrincipal principal,
+            MonopolyGameState state,
+            MonopolyDtos.MonopolyActionRequest request,
+            UUID actorPlayerId) {
+        if (state.phase() != MonopolyPhase.RAISING_FUNDS) {
+            return actorPlayerId;
+        }
+        RoomEntity room = roomRepository.findById(roomId).orElse(null);
+        if (room == null
+                || room.getPlayMode() != PlayMode.LOCAL
+                || !room.getHostUserId().equals(principal.userId())) {
+            return actorPlayerId;
+        }
+        if ((request.type() == MonopolyActionType.ACCEPT_SALE || request.type() == MonopolyActionType.DECLINE_SALE)
+                && state.pendingSale() != null) {
+            return state.pendingSale().buyerId();
+        }
+        if (state.pendingDebt() != null) {
+            return state.pendingDebt().debtorId();
+        }
+        return actorPlayerId;
+    }
+
+    private MonopolyDtos.PendingDebtResponse toDebt(PendingDebt debt) {
+        if (debt == null) {
+            return null;
+        }
+        return new MonopolyDtos.PendingDebtResponse(debt.debtorId(), debt.creditorId(), debt.amount(), debt.reason());
+    }
+
+    private MonopolyDtos.PendingSaleResponse toSale(PendingSale sale) {
+        if (sale == null) {
+            return null;
+        }
+        return new MonopolyDtos.PendingSaleResponse(sale.sellerId(), sale.buyerId(), sale.tilePosition(), sale.price());
     }
 
     private void persistState(GameSessionEntity session, MonopolyGameState state) {

@@ -11,6 +11,8 @@ import com.gamehub.monopoly.domain.MonopolyAction;
 import com.gamehub.monopoly.domain.MonopolyActionType;
 import com.gamehub.monopoly.domain.MonopolyGameState;
 import com.gamehub.monopoly.domain.MonopolyPhase;
+import com.gamehub.monopoly.domain.PendingDebt;
+import com.gamehub.monopoly.domain.PendingSale;
 import com.gamehub.monopoly.domain.PlayerAsset;
 import com.gamehub.monopoly.domain.Property;
 import com.gamehub.monopoly.domain.PropertyDevelopment;
@@ -48,10 +50,15 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
     private static final int[] RAILROAD_POSITIONS = {5, 15, 25, 35};
     private static final int[] UTILITY_POSITIONS = {12, 28};
 
-    private final Random random = new Random();
+    private Random random = new Random();
     
     @Autowired(required = false)
     private BankerOllamaService bankerOllamaService;
+
+    /** Test hook so a roll can land on a chosen tile. */
+    void setRandom(Random random) {
+        this.random = random;
+    }
 
     @Override
     public GameType supportedGameType() {
@@ -107,7 +114,24 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         boolean bankAction = action.type() == MonopolyActionType.BANK_ADJUST
                 || action.type() == MonopolyActionType.BANK_TRANSFER;
-        if (!bankAction && !state.currentPlayerId().equals(action.actorPlayerId())) {
+        if (bankAction) {
+            return;
+        }
+        if (state.phase() == MonopolyPhase.RAISING_FUNDS) {
+            if (action.type() == MonopolyActionType.ACCEPT_SALE || action.type() == MonopolyActionType.DECLINE_SALE) {
+                PendingSale sale = state.pendingSale();
+                if (sale == null || !sale.buyerId().equals(action.actorPlayerId())) {
+                    throw new BusinessRuleViolationException("Only the buyer can respond to this offer");
+                }
+                return;
+            }
+            UUID debtorId = state.pendingDebt() == null ? state.currentPlayerId() : state.pendingDebt().debtorId();
+            if (!debtorId.equals(action.actorPlayerId())) {
+                throw new BusinessRuleViolationException("It is not this player's turn");
+            }
+            return;
+        }
+        if (!state.currentPlayerId().equals(action.actorPlayerId())) {
             throw new BusinessRuleViolationException("It is not this player's turn");
         }
     }
@@ -115,6 +139,21 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
     @Override
     public MonopolyGameState processAction(MonopolyGameState state, MonopolyAction action) {
         validateAction(state, action);
+        if (state.phase() == MonopolyPhase.RAISING_FUNDS) {
+            return switch (action.type()) {
+                case MORTGAGE -> mortgage(state, action);
+                case UNMORTGAGE -> unmortgage(state, action);
+                case SELL_HOUSE -> sellHouse(state, action);
+                case PAY_DEBT -> payDebt(state, action);
+                case DECLARE_BANKRUPTCY -> declareBankruptcy(state, action);
+                case PROPOSE_SALE -> proposeSale(state, action);
+                case ACCEPT_SALE -> acceptSale(state, action);
+                case DECLINE_SALE -> declineSale(state, action);
+                case BANK_ADJUST -> bankAdjust(state, action);
+                case BANK_TRANSFER -> bankTransfer(state, action);
+                default -> throw new BusinessRuleViolationException("Resolve the outstanding debt first");
+            };
+        }
         return switch (action.type()) {
             case ROLL_DICE -> rollDice(state);
             case BUY_PROPERTY -> buyProperty(state);
@@ -131,6 +170,8 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
             case BANK_ADJUST -> bankAdjust(state, action);
             case BANK_TRANSFER -> bankTransfer(state, action);
             case END_TURN -> endTurn(state);
+            case PAY_DEBT, DECLARE_BANKRUPTCY, PROPOSE_SALE, ACCEPT_SALE, DECLINE_SALE ->
+                    throw new BusinessRuleViolationException("That action is only available while raising funds");
         };
     }
 
@@ -155,7 +196,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         log.add("Player paid jail fee: " + fee);
         return new MonopolyGameState(
                 state.sessionId(),
-                MonopolyPhase.WAITING_FOR_DECISION,
+                MonopolyPhase.WAITING_FOR_ROLL,
                 state.currentPlayerId(),
                 state.currentTurn(),
                 state.lastDiceTotal(),
@@ -188,7 +229,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         log.add("Player used a Get Out of Jail Free card");
         return new MonopolyGameState(
                 state.sessionId(),
-                MonopolyPhase.WAITING_FOR_DECISION,
+                MonopolyPhase.WAITING_FOR_ROLL,
                 state.currentPlayerId(),
                 state.currentTurn(),
                 state.lastDiceTotal(),
@@ -208,7 +249,8 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
             throw new BusinessRuleViolationException("Only properties can sell houses");
         }
         UUID ownerId = state.owners().get(tilePosition);
-        if (!ownerId.equals(state.currentPlayerId())) {
+        UUID actorId = action.actorPlayerId();
+        if (ownerId == null || !ownerId.equals(actorId)) {
             throw new BusinessRuleViolationException("Player does not own this property");
         }
         Map<Integer, PropertyDevelopment> developments = new HashMap<>(state.developments());
@@ -218,14 +260,8 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         int refund = property.houseCost() / 2;
         Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
-        PlayerAsset p = assets.get(state.currentPlayerId());
-        assets.put(p.playerId(), new PlayerAsset(
-                p.playerId(),
-                p.cash() + refund,
-                p.position(),
-                p.inJail(),
-                p.jailTurns(),
-                p.ownedTilePositions()));
+        PlayerAsset p = assets.get(actorId);
+        assets.put(p.playerId(), withCash(p, p.cash() + refund));
         PropertyDevelopment updatedDev;
         if (current.hotel()) {
             // demote hotel to 4 houses
@@ -235,20 +271,8 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         developments.put(tilePosition, updatedDev);
         List<String> log = new java.util.ArrayList<>(state.log());
-        log.add("House sold on " + tile.name());
-        return new MonopolyGameState(
-                state.sessionId(),
-                MonopolyPhase.WAITING_FOR_DECISION,
-                state.currentPlayerId(),
-                state.currentTurn(),
-                state.lastDiceTotal(),
-                state.board(),
-                assets,
-                new HashMap<>(state.owners()),
-                developments,
-                new HashSet<>(state.mortgagedTiles()),
-                log,
-                state.activeEvent());
+        log.add((current.hotel() ? "Hotel sold on " : "House sold on ") + tile.name() + " for " + refund);
+        return carry(state, decisionPhase(state), assets, new HashMap<>(state.owners()), developments, new HashSet<>(state.mortgagedTiles()), log);
     }
 
     private MonopolyGameState rollDice(MonopolyGameState state) {
@@ -263,8 +287,10 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         int nextPosition = (currentPosition + total) % state.board().tiles().size();
         int cash = currentAsset.cash();
         IndianEvent activeEvent = expireEventIfNeeded(state, state.activeEvent());
-        if (currentPosition + total >= state.board().tiles().size()) {
-            cash += goBonus(activeEvent);
+        boolean passedGo = currentPosition + total >= state.board().tiles().size();
+        int salary = passedGo ? goBonus(activeEvent) : 0;
+        if (passedGo) {
+            cash += salary;
         }
         Tile landedTile = state.board().tileAt(nextPosition);
         PlayerAsset updatedAsset = new PlayerAsset(
@@ -280,45 +306,41 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
 
         List<String> log = new ArrayList<>(state.log());
         log.add("%s rolled %d and landed on %s".formatted(playerLabel(state, state.currentPlayerId()), total, landedTile.name()));
+        if (passedGo) {
+            log.add("%s passed GO. +%d".formatted(playerLabel(state, state.currentPlayerId()), salary));
+        }
 
         MonopolyPhase phase = MonopolyPhase.WAITING_FOR_DECISION;
+        Settlement settlement = new Settlement(state, assets, log, phase);
         if (landedTile instanceof SimpleTile simpleTile) {
             if (simpleTile.tileType() == TileType.TAX) {
                 int tax = taxAmount(simpleTile, activeEvent);
-                assets.put(updatedAsset.playerId(), new PlayerAsset(
-                        updatedAsset.playerId(),
-                        updatedAsset.cash() - tax,
-                        updatedAsset.position(),
-                        false,
-                        0,
-                        updatedAsset.ownedTilePositions()));
-                log.add("Tax collected: " + tax);
+                settlement.charge(state.currentPlayerId(), null, tax, "Tax " + simpleTile.name());
             } else if (simpleTile.tileType() == TileType.GO_TO_JAIL) {
-                assets.put(updatedAsset.playerId(), new PlayerAsset(
-                        updatedAsset.playerId(),
-                        updatedAsset.cash(),
+                PlayerAsset mover = settlement.asset(updatedAsset.playerId());
+                settlement.replace(new PlayerAsset(
+                        mover.playerId(),
+                        mover.cash(),
                         10,
                         true,
                         1,
-                        updatedAsset.ownedTilePositions()));
-                log.add("Player sent to jail");
+                        mover.ownedTilePositions()));
+                settlement.log().add("Player sent to jail");
             } else if (simpleTile.tileType() == TileType.CHANCE
                     || simpleTile.tileType() == TileType.COMMUNITY_CHEST) {
                 BharatCards.Deck deck = simpleTile.tileType() == TileType.CHANCE
                         ? BharatCards.Deck.CHANCE
                         : BharatCards.Deck.CHEST;
-                CardDrawResult drawn = drawAndApplyCard(state, assets, log, updatedAsset.playerId(), deck);
-                assets = drawn.assets();
-                log = drawn.log();
+                drawAndApplyCard(state, settlement, updatedAsset.playerId(), deck);
             } else if (simpleTile.tileType() == TileType.FREE_PARKING) {
                 int expires = state.currentTurn() + Math.max(4, 2 * state.assets().size());
                 String exclude = activeEvent != null ? activeEvent.id() : null;
                 activeEvent = exclude != null
                         ? IndianEvents.drawExcluding(exclude, expires)
                         : IndianEvents.draw(expires);
-                log.add("Indian Event: " + activeEvent.title() + " — " + activeEvent.description());
+                settlement.log().add("Indian Event: " + activeEvent.title() + " — " + activeEvent.description());
                 if ("FLOODS".equals(activeEvent.id()) || "CYCLONE".equals(activeEvent.id())) {
-                    assets = payFloodInsurance(state, assets, log);
+                    settlement.setAssets(payFloodInsurance(state, settlement.assets(), settlement.log()));
                 }
             }
         } else if (state.owners().containsKey(landedTile.position())
@@ -331,48 +353,22 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                     state.currentTurn(),
                     total,
                     state.board(),
-                    assets,
+                    settlement.assets(),
                     state.owners(),
                     state.developments(),
                     state.mortgagedTiles(),
                     state.log(),
                     activeEvent);
-            int rent = rentFor(landedTile, state.developments().get(landedTile.position()), rentState, assets);
+            int rent = rentFor(landedTile, state.developments().get(landedTile.position()), rentState, settlement.assets());
             UUID ownerId = state.owners().get(landedTile.position());
-            PlayerAsset owner = assets.get(ownerId);
-            PlayerAsset payer = assets.get(updatedAsset.playerId());
-            assets.put(updatedAsset.playerId(), new PlayerAsset(
-                    payer.playerId(),
-                    payer.cash() - rent,
-                    payer.position(),
-                    payer.inJail(),
-                    payer.jailTurns(),
-                    payer.ownedTilePositions()));
-            assets.put(ownerId, new PlayerAsset(
-                    owner.playerId(),
-                    owner.cash() + rent,
-                    owner.position(),
-                    owner.inJail(),
-                    owner.jailTurns(),
-                    owner.ownedTilePositions()));
-            log.add("Rent paid: " + rent + " to " + playerLabel(state, ownerId));
-        } else if (!(landedTile instanceof Property || landedTile instanceof Railroad || landedTile instanceof Utility)) {
-            phase = MonopolyPhase.WAITING_FOR_DECISION;
+            settlement.charge(state.currentPlayerId(), ownerId, rent, "Rent for " + landedTile.name());
+        } else if (landedTile instanceof Property
+                && state.currentPlayerId().equals(state.owners().get(landedTile.position()))
+                && !state.mortgagedTiles().contains(landedTile.position())) {
+            settlement.log().add("Upgrade available on " + landedTile.name());
         }
 
-        return new MonopolyGameState(
-                state.sessionId(),
-                phase,
-                state.currentPlayerId(),
-                state.currentTurn(),
-                total,
-                state.board(),
-                assets,
-                new HashMap<>(state.owners()),
-                new HashMap<>(state.developments()),
-                new HashSet<>(state.mortgagedTiles()),
-                log,
-                activeEvent);
+        return handoverIfIdle(publish(state, settlement, state.currentPlayerId(), state.currentTurn(), total, activeEvent));
     }
 
     private MonopolyGameState buyProperty(MonopolyGameState state) {
@@ -420,7 +416,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
             logMsg += " (Banker: " + bankerDecision.reasoning() + ")";
         }
         log.add(logMsg);
-        return new MonopolyGameState(
+        return handoverIfIdle(new MonopolyGameState(
                 state.sessionId(),
                 MonopolyPhase.WAITING_FOR_DECISION,
                 state.currentPlayerId(),
@@ -432,19 +428,26 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 new HashMap<>(state.developments()),
                 new HashSet<>(state.mortgagedTiles()),
                 log,
-                state.activeEvent());
+                state.activeEvent()));
     }
 
     private MonopolyGameState payRent(MonopolyGameState state, MonopolyAction action) {
         if (action.targetPlayerId() == null || action.amount() == null) {
             throw new BusinessRuleViolationException("PAY_RENT requires target player and amount");
         }
-        return transfer(state, state.currentPlayerId(), action.targetPlayerId(), action.amount(), "Manual rent payment");
+        Settlement settlement = new Settlement(
+                state,
+                new LinkedHashMap<>(state.assets()),
+                new ArrayList<>(state.log()),
+                MonopolyPhase.WAITING_FOR_DECISION);
+        settlement.charge(state.currentPlayerId(), action.targetPlayerId(), action.amount(), "Rent");
+        return publish(state, settlement, state.currentPlayerId(), state.currentTurn(), state.lastDiceTotal(), state.activeEvent());
     }
 
     private MonopolyGameState mortgage(MonopolyGameState state, MonopolyAction action) {
         int tilePosition = requiredTilePosition(action);
-        if (!ownsTile(state, state.currentPlayerId(), tilePosition)) {
+        UUID actorId = action.actorPlayerId();
+        if (!ownsTile(state, actorId, tilePosition)) {
             throw new BusinessRuleViolationException("Player does not own this tile");
         }
         if (state.mortgagedTiles().contains(tilePosition)) {
@@ -456,42 +459,26 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         Tile tile = state.board().tileAt(tilePosition);
         int amount = purchasePrice(tile) / 2;
-        
-        // Get banker advice on mortgage
+
         String advice = getBankerPropertyAdvice(state, tile.name(), amount, false);
-        
+
         Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
-        PlayerAsset asset = assets.get(state.currentPlayerId());
-        assets.put(asset.playerId(), new PlayerAsset(
-                asset.playerId(),
-                asset.cash() + amount,
-                asset.position(),
-                asset.inJail(),
-                asset.jailTurns(),
-                asset.ownedTilePositions()));
+        PlayerAsset asset = assets.get(actorId);
+        assets.put(asset.playerId(), withCash(asset, asset.cash() + amount));
         Set<Integer> mortgagedTiles = new HashSet<>(state.mortgagedTiles());
         mortgagedTiles.add(tilePosition);
         List<String> log = new ArrayList<>(state.log());
-        log.add("Mortgage placed on " + tile.name() + " (Banker: " + advice + ")");
-        return new MonopolyGameState(
-                state.sessionId(),
-                MonopolyPhase.WAITING_FOR_DECISION,
-                state.currentPlayerId(),
-                state.currentTurn(),
-                state.lastDiceTotal(),
-                state.board(),
-                assets,
-                new HashMap<>(state.owners()),
-                new HashMap<>(state.developments()),
-                mortgagedTiles,
-                log,
-                state.activeEvent());
+        log.add("Mortgage placed on " + tile.name() + " for " + amount + " (Banker: " + advice + ")");
+        return carry(state, decisionPhase(state), assets, new HashMap<>(state.owners()), new HashMap<>(state.developments()), mortgagedTiles, log);
     }
 
     private MonopolyGameState unmortgage(MonopolyGameState state, MonopolyAction action) {
         int tilePosition = requiredTilePosition(action);
         if (!state.mortgagedTiles().contains(tilePosition)) {
             throw new BusinessRuleViolationException("Tile is not mortgaged");
+        }
+        if (!ownsTile(state, action.actorPlayerId(), tilePosition)) {
+            throw new BusinessRuleViolationException("Player does not own this tile");
         }
         Tile tile = state.board().tileAt(tilePosition);
         int cost = unmortgageCost(state, tile);
@@ -510,17 +497,11 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         
         Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
-        PlayerAsset asset = assets.get(state.currentPlayerId());
+        PlayerAsset asset = assets.get(action.actorPlayerId());
         if (asset.cash() < cost) {
             throw new BusinessRuleViolationException("Insufficient funds");
         }
-        assets.put(asset.playerId(), new PlayerAsset(
-                asset.playerId(),
-                asset.cash() - cost,
-                asset.position(),
-                asset.inJail(),
-                asset.jailTurns(),
-                asset.ownedTilePositions()));
+        assets.put(asset.playerId(), withCash(asset, asset.cash() - cost));
         Set<Integer> mortgagedTiles = new HashSet<>(state.mortgagedTiles());
         mortgagedTiles.remove(tilePosition);
         List<String> log = new ArrayList<>(state.log());
@@ -529,19 +510,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
             logMsg += " (Banker: " + bankerDecision.reasoning() + ")";
         }
         log.add(logMsg);
-        return new MonopolyGameState(
-                state.sessionId(),
-                MonopolyPhase.WAITING_FOR_DECISION,
-                state.currentPlayerId(),
-                state.currentTurn(),
-                state.lastDiceTotal(),
-                state.board(),
-                assets,
-                new HashMap<>(state.owners()),
-                new HashMap<>(state.developments()),
-                mortgagedTiles,
-                log,
-                state.activeEvent());
+        return carry(state, decisionPhase(state), assets, new HashMap<>(state.owners()), new HashMap<>(state.developments()), mortgagedTiles, log);
     }
 
     private MonopolyGameState buildHouse(MonopolyGameState state, MonopolyAction action) {
@@ -555,6 +524,12 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         if (state.mortgagedTiles().contains(tilePosition)) {
             throw new BusinessRuleViolationException("Cannot upgrade a mortgaged property");
+        }
+        PlayerAsset standing = state.assets().get(state.currentPlayerId());
+        if (standing == null
+                || standing.position() != tilePosition
+                || !upgradeOfferedThisVisit(state, property.name())) {
+            throw new BusinessRuleViolationException("Land on this property again to upgrade it");
         }
         Map<Integer, PropertyDevelopment> developments = new HashMap<>(state.developments());
         PropertyDevelopment current = developments.getOrDefault(tilePosition, new PropertyDevelopment(0, false));
@@ -581,7 +556,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         developments.put(tilePosition, new PropertyDevelopment(current.houses() + 1, false));
         List<String> log = new ArrayList<>(state.log());
         log.add("House built on " + property.name() + " for " + buildCost + " (Banker: " + advice + ")");
-        return new MonopolyGameState(
+        return handoverIfIdle(new MonopolyGameState(
                 state.sessionId(),
                 MonopolyPhase.WAITING_FOR_DECISION,
                 state.currentPlayerId(),
@@ -593,7 +568,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 developments,
                 new HashSet<>(state.mortgagedTiles()),
                 log,
-                state.activeEvent());
+                state.activeEvent()));
     }
 
     private MonopolyGameState buildHotel(MonopolyGameState state, MonopolyAction action) {
@@ -607,6 +582,12 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         }
         if (state.mortgagedTiles().contains(tilePosition)) {
             throw new BusinessRuleViolationException("Cannot upgrade a mortgaged property");
+        }
+        PlayerAsset standing = state.assets().get(state.currentPlayerId());
+        if (standing == null
+                || standing.position() != tilePosition
+                || !upgradeOfferedThisVisit(state, property.name())) {
+            throw new BusinessRuleViolationException("Land on this property again to upgrade it");
         }
         PropertyDevelopment development = state.developments().getOrDefault(tilePosition, new PropertyDevelopment(0, false));
         if (development.houses() < 4 || development.hotel()) {
@@ -632,7 +613,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         developments.put(tilePosition, new PropertyDevelopment(4, true));
         List<String> log = new ArrayList<>(state.log());
         log.add("Hotel built on " + tile.name() + " (Banker: " + advice + ")");
-        return new MonopolyGameState(
+        return handoverIfIdle(new MonopolyGameState(
                 state.sessionId(),
                 MonopolyPhase.WAITING_FOR_DECISION,
                 state.currentPlayerId(),
@@ -644,7 +625,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 developments,
                 new HashSet<>(state.mortgagedTiles()),
                 log,
-                state.activeEvent());
+                state.activeEvent()));
     }
 
     private MonopolyGameState trade(MonopolyGameState state, MonopolyAction action) {
@@ -696,7 +677,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 target.inJail(),
                 target.jailTurns(),
                 targetTiles));
-        return new MonopolyGameState(
+        return handoverIfIdle(new MonopolyGameState(
                 state.sessionId(),
                 MonopolyPhase.WAITING_FOR_DECISION,
                 state.currentPlayerId(),
@@ -708,7 +689,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 new HashMap<>(state.developments()),
                 new HashSet<>(state.mortgagedTiles()),
                 append(state.log(), "Trade completed"),
-                state.activeEvent());
+                state.activeEvent()));
     }
 
     private MonopolyGameState auction(MonopolyGameState state, MonopolyAction action) {
@@ -745,7 +726,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 owned));
         Map<Integer, UUID> owners = new HashMap<>(state.owners());
         owners.put(tilePosition, winner.playerId());
-        return new MonopolyGameState(
+        return handoverIfIdle(new MonopolyGameState(
                 state.sessionId(),
                 MonopolyPhase.WAITING_FOR_DECISION,
                 state.currentPlayerId(),
@@ -757,17 +738,79 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 new HashMap<>(state.developments()),
                 new HashSet<>(state.mortgagedTiles()),
                 append(state.log(), "Auction won for " + tile.name()),
-                state.activeEvent());
+                state.activeEvent()));
+    }
+
+    /** Passes the turn after a buy, auction, upgrade, or landing that needs no further choice. */
+    public MonopolyGameState handOver(MonopolyGameState state) {
+        return endTurn(state);
+    }
+
+    /**
+     * Ends the turn when the current player has nothing left to choose.
+     * A purchase or a city upgrade keeps the turn open.
+     */
+    private MonopolyGameState handoverIfIdle(MonopolyGameState state) {
+        if (state.phase() != MonopolyPhase.WAITING_FOR_DECISION) {
+            return state;
+        }
+        if (awaitsPurchase(state) || awaitsUpgrade(state)) {
+            return state;
+        }
+        return endTurn(state);
+    }
+
+    private boolean awaitsPurchase(MonopolyGameState state) {
+        PlayerAsset asset = state.assets().get(state.currentPlayerId());
+        if (asset == null) {
+            return false;
+        }
+        Tile tile = state.board().tileAt(asset.position());
+        return purchasePrice(tile) > 0 && !state.owners().containsKey(tile.position());
+    }
+
+    private boolean awaitsUpgrade(MonopolyGameState state) {
+        PlayerAsset asset = state.assets().get(state.currentPlayerId());
+        if (asset == null) {
+            return false;
+        }
+        Tile tile = state.board().tileAt(asset.position());
+        if (!(tile instanceof Property property)) {
+            return false;
+        }
+        if (!state.currentPlayerId().equals(state.owners().get(tile.position()))) {
+            return false;
+        }
+        if (state.mortgagedTiles().contains(tile.position())) {
+            return false;
+        }
+        PropertyDevelopment development = state.developments().get(tile.position());
+        if (development != null && (development.hotel() || development.houses() >= 5)) {
+            return false;
+        }
+        return upgradeOfferedThisVisit(state, property.name());
     }
 
     private MonopolyGameState endTurn(MonopolyGameState state) {
+        if (state.phase() == MonopolyPhase.RAISING_FUNDS) {
+            throw new BusinessRuleViolationException("Resolve the outstanding debt first");
+        }
+        if (state.phase() != MonopolyPhase.WAITING_FOR_DECISION) {
+            return state;
+        }
         List<UUID> players = new ArrayList<>(state.assets().keySet());
-        int currentIndex = players.indexOf(state.currentPlayerId());
-        UUID nextPlayer = players.get((currentIndex + 1) % players.size());
+        UUID nextPlayer = nextSolventPlayer(state, state.currentPlayerId());
+        if (nextPlayer == null) {
+            return finishGame(state, state.currentPlayerId(), append(state.log(), "Turn ended"));
+        }
         int nextTurn = state.currentTurn() + 1;
         IndianEvent event = state.activeEvent();
         if (event != null && nextTurn > event.expiresOnTurn()) {
             event = null;
+        }
+        long solvent = players.stream().filter(id -> !state.bankruptPlayerIds().contains(id)).count();
+        if (solvent <= 1) {
+            return finishGame(state, nextPlayer, append(state.log(), "Turn ended"));
         }
         return new MonopolyGameState(
                 state.sessionId(),
@@ -781,7 +824,11 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 new HashMap<>(state.developments()),
                 new HashSet<>(state.mortgagedTiles()),
                 append(state.log(), "Turn ended"),
-                event);
+                event,
+                null,
+                state.bankruptPlayerIds(),
+                List.of(),
+                null);
     }
 
     private MonopolyGameState bankAdjust(MonopolyGameState state, MonopolyAction action) {
@@ -805,19 +852,14 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 target.jailTurns(),
                 target.ownedTilePositions()));
         String signed = action.amount() > 0 ? "+" + action.amount() : String.valueOf(action.amount());
-        return new MonopolyGameState(
-                state.sessionId(),
+        return carry(
+                state,
                 state.phase(),
-                state.currentPlayerId(),
-                state.currentTurn(),
-                state.lastDiceTotal(),
-                state.board(),
                 assets,
                 new HashMap<>(state.owners()),
                 new HashMap<>(state.developments()),
                 new HashSet<>(state.mortgagedTiles()),
-                append(state.log(), "Bank: " + signed + " to " + playerLabel(state, target.playerId())),
-                state.activeEvent());
+                append(state.log(), "Bank: " + signed + " to " + playerLabel(state, target.playerId())));
     }
 
     private MonopolyGameState bankTransfer(MonopolyGameState state, MonopolyAction action) {
@@ -860,13 +902,9 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 to.inJail(),
                 to.jailTurns(),
                 to.ownedTilePositions()));
-        return new MonopolyGameState(
-                state.sessionId(),
+        return carry(
+                state,
                 state.phase(),
-                state.currentPlayerId(),
-                state.currentTurn(),
-                state.lastDiceTotal(),
-                state.board(),
                 assets,
                 new HashMap<>(state.owners()),
                 new HashMap<>(state.developments()),
@@ -878,8 +916,7 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                                 + " from "
                                 + playerLabel(state, fromId)
                                 + " to "
-                                + playerLabel(state, action.targetPlayerId())),
-                state.activeEvent());
+                                + playerLabel(state, action.targetPlayerId())));
     }
 
     private String playerLabel(MonopolyGameState state, UUID playerId) {
@@ -928,6 +965,29 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
 
     private boolean ownsTile(MonopolyGameState state, UUID playerId, int tilePosition) {
         return playerId.equals(state.owners().get(tilePosition));
+    }
+
+    /** One upgrade per visit, only after landing again on a city the player already owns. */
+    private boolean upgradeOfferedThisVisit(MonopolyGameState state, String tileName) {
+        String marker = "Upgrade available on " + tileName;
+        String built = "House built on " + tileName;
+        String hotel = "Hotel built on " + tileName;
+        List<String> log = state.log();
+        for (int i = log.size() - 1; i >= 0; i--) {
+            String line = log.get(i);
+            if (line.startsWith("Turn ended")) return false;
+            if (line.startsWith(built) || line.startsWith(hotel)) return false;
+            if (line.equals(marker)) return true;
+        }
+        return false;
+    }
+
+    private void markUpgradeIfRevisited(MonopolyGameState state, UUID playerId, int position, List<String> log) {
+        Tile tile = state.board().tileAt(position);
+        if (!(tile instanceof Property property)) return;
+        if (!ownsTile(state, playerId, position)) return;
+        if (state.mortgagedTiles().contains(position)) return;
+        log.add("Upgrade available on " + property.name());
     }
 
     private int purchasePrice(Tile tile) {
@@ -1102,183 +1162,110 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         return count;
     }
 
-    private record CardDrawResult(Map<UUID, PlayerAsset> assets, List<String> log, boolean sentToJail) {}
-
-    private CardDrawResult drawAndApplyCard(
+    private void drawAndApplyCard(
             MonopolyGameState state,
-            Map<UUID, PlayerAsset> assets,
-            List<String> log,
+            Settlement settlement,
             UUID playerId,
             BharatCards.Deck deckType) {
         BharatCards.Card[] deck = deckType == BharatCards.Deck.CHANCE ? BharatCards.CHANCE : BharatCards.CHEST;
         BharatCards.Card card = deck[random.nextInt(deck.length)];
-        List<String> nextLog = new ArrayList<>(log);
-        nextLog.add("Card (" + deckType.name() + "): " + card.text());
-        Map<UUID, PlayerAsset> nextAssets = new LinkedHashMap<>(assets);
-        PlayerAsset player = nextAssets.get(playerId);
-        boolean sentToJail = false;
+        settlement.log().add("Card (" + deckType.name() + "): " + card.text());
+        PlayerAsset player = settlement.asset(playerId);
 
         switch (card.kind()) {
             case MONEY -> {
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(),
-                        player.cash() + card.amount(),
-                        player.position(),
-                        player.inJail(),
-                        player.jailTurns(),
-                        player.ownedTilePositions()));
+                if (card.amount() >= 0) {
+                    settlement.replace(withCash(player, player.cash() + card.amount()));
+                } else {
+                    settlement.charge(playerId, null, -card.amount(), "Card");
+                }
             }
             case MONEY_FROM_EACH -> {
                 int amt = card.amount();
-                int cash = player.cash();
-                for (Map.Entry<UUID, PlayerAsset> entry : nextAssets.entrySet()) {
-                    if (entry.getKey().equals(playerId)) continue;
-                    PlayerAsset other = entry.getValue();
+                for (UUID otherId : new ArrayList<>(settlement.assets().keySet())) {
+                    if (otherId.equals(playerId) || state.bankruptPlayerIds().contains(otherId)) {
+                        continue;
+                    }
                     if (amt >= 0) {
-                        cash += amt;
-                        entry.setValue(new PlayerAsset(
-                                other.playerId(),
-                                other.cash() - amt,
-                                other.position(),
-                                other.inJail(),
-                                other.jailTurns(),
-                                other.ownedTilePositions()));
+                        settlement.charge(otherId, playerId, amt, "Card");
                     } else {
-                        int pay = -amt;
-                        cash -= pay;
-                        entry.setValue(new PlayerAsset(
-                                other.playerId(),
-                                other.cash() + pay,
-                                other.position(),
-                                other.inJail(),
-                                other.jailTurns(),
-                                other.ownedTilePositions()));
+                        settlement.charge(playerId, otherId, -amt, "Card");
                     }
                 }
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(),
-                        cash,
-                        player.position(),
-                        player.inJail(),
-                        player.jailTurns(),
-                        player.ownedTilePositions()));
             }
             case MOVE -> {
                 int from = player.position();
                 int to = card.to();
-                int boardSize = state.board().tiles().size();
                 int cash = player.cash();
                 if (card.collectGoIfPass() && to < from) {
                     cash += GO_BONUS;
                 }
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(),
-                        cash,
-                        to,
-                        false,
-                        0,
-                        player.ownedTilePositions()));
-                nextLog.add("Moved to " + state.board().tileAt(to).name());
-                // Collect rent if landing on owned tile (simple pass)
+                settlement.replace(new PlayerAsset(player.playerId(), cash, to, false, 0, player.ownedTilePositions()));
+                settlement.log().add("Moved to " + state.board().tileAt(to).name());
                 Tile dest = state.board().tileAt(to);
                 if (state.owners().containsKey(to)
                         && !state.owners().get(to).equals(playerId)
                         && !state.mortgagedTiles().contains(to)) {
-                    int rent = rentFor(dest, state.developments().get(to), state, nextAssets);
-                    PlayerAsset mover = nextAssets.get(playerId);
-                    UUID ownerId = state.owners().get(to);
-                    PlayerAsset owner = nextAssets.get(ownerId);
-                    nextAssets.put(playerId, new PlayerAsset(
-                            mover.playerId(),
-                            mover.cash() - rent,
-                            mover.position(),
-                            false,
-                            0,
-                            mover.ownedTilePositions()));
-                    nextAssets.put(ownerId, new PlayerAsset(
-                            owner.playerId(),
-                            owner.cash() + rent,
-                            owner.position(),
-                            owner.inJail(),
-                            owner.jailTurns(),
-                            owner.ownedTilePositions()));
-                    nextLog.add("Rent paid from card move: " + rent);
+                    int rent = rentFor(dest, state.developments().get(to), state, settlement.assets());
+                    settlement.charge(playerId, state.owners().get(to), rent, "Rent for " + dest.name());
+                } else {
+                    markUpgradeIfRevisited(state, playerId, to, settlement.log());
                 }
             }
             case MOVE_REL -> {
                 int boardSize = state.board().tiles().size();
                 int nextPos = ((player.position() + card.amount()) % boardSize + boardSize) % boardSize;
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(),
-                        player.cash(),
-                        nextPos,
-                        false,
-                        0,
-                        player.ownedTilePositions()));
-                nextLog.add("Moved to " + state.board().tileAt(nextPos).name());
+                settlement.replace(new PlayerAsset(
+                        player.playerId(), player.cash(), nextPos, false, 0, player.ownedTilePositions()));
+                settlement.log().add("Moved to " + state.board().tileAt(nextPos).name());
+                markUpgradeIfRevisited(state, playerId, nextPos, settlement.log());
             }
             case JAIL -> {
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(),
-                        player.cash(),
-                        10,
-                        true,
-                        1,
-                        player.ownedTilePositions()));
-                nextLog.add("Player sent to jail by card");
-                sentToJail = true;
+                settlement.replace(new PlayerAsset(player.playerId(), player.cash(), 10, true, 1, player.ownedTilePositions()));
+                settlement.log().add("Player sent to jail by card");
             }
-            case GET_OUT -> nextLog.add("Get Out of Jail Free held (use via jail card action)");
+            case GET_OUT -> settlement.log().add("Get Out of Jail Free held (use via jail card action)");
             case NEAREST_RAILROAD -> {
                 int nextPos = nearestAhead(player.position(), RAILROAD_POSITIONS, state.board().tiles().size());
                 int cash = player.cash();
-                if (nextPos < player.position()) cash += GO_BONUS;
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(), cash, nextPos, false, 0, player.ownedTilePositions()));
-                nextLog.add("Advanced to nearest railway: " + state.board().tileAt(nextPos).name());
+                if (nextPos < player.position()) {
+                    cash += GO_BONUS;
+                }
+                settlement.replace(new PlayerAsset(player.playerId(), cash, nextPos, false, 0, player.ownedTilePositions()));
+                settlement.log().add("Advanced to nearest railway: " + state.board().tileAt(nextPos).name());
                 Tile dest = state.board().tileAt(nextPos);
                 if (state.owners().containsKey(nextPos)
                         && !playerId.equals(state.owners().get(nextPos))
                         && !state.mortgagedTiles().contains(nextPos)) {
-                    int rent = rentFor(dest, null, state, nextAssets) * 2;
-                    PlayerAsset mover = nextAssets.get(playerId);
-                    UUID ownerId = state.owners().get(nextPos);
-                    PlayerAsset owner = nextAssets.get(ownerId);
-                    nextAssets.put(playerId, new PlayerAsset(
-                            mover.playerId(), mover.cash() - rent, mover.position(), false, 0, mover.ownedTilePositions()));
-                    nextAssets.put(ownerId, new PlayerAsset(
-                            owner.playerId(), owner.cash() + rent, owner.position(), owner.inJail(), owner.jailTurns(), owner.ownedTilePositions()));
-                    nextLog.add("Double railway rent paid: " + rent);
+                    int rent = rentFor(dest, null, state, settlement.assets()) * 2;
+                    settlement.charge(playerId, state.owners().get(nextPos), rent, "Double railway rent for " + dest.name());
                 }
             }
             case NEAREST_UTILITY -> {
                 int nextPos = nearestAhead(player.position(), UTILITY_POSITIONS, state.board().tiles().size());
                 int cash = player.cash();
-                if (nextPos < player.position()) cash += GO_BONUS;
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(), cash, nextPos, false, 0, player.ownedTilePositions()));
-                nextLog.add("Advanced to nearest utility: " + state.board().tileAt(nextPos).name());
+                if (nextPos < player.position()) {
+                    cash += GO_BONUS;
+                }
+                settlement.replace(new PlayerAsset(player.playerId(), cash, nextPos, false, 0, player.ownedTilePositions()));
+                settlement.log().add("Advanced to nearest utility: " + state.board().tileAt(nextPos).name());
             }
             case REPAIRS -> {
                 int cost = 0;
                 for (int pos : player.ownedTilePositions()) {
                     PropertyDevelopment dev = state.developments().get(pos);
-                    if (dev == null) continue;
-                    if (dev.hotel()) cost += card.perHotel();
-                    else cost += card.perHouse() * Math.max(0, dev.houses());
+                    if (dev == null) {
+                        continue;
+                    }
+                    if (dev.hotel()) {
+                        cost += card.perHotel();
+                    } else {
+                        cost += card.perHouse() * Math.max(0, dev.houses());
+                    }
                 }
-                nextAssets.put(playerId, new PlayerAsset(
-                        player.playerId(),
-                        player.cash() - cost,
-                        player.position(),
-                        player.inJail(),
-                        player.jailTurns(),
-                        player.ownedTilePositions()));
-                nextLog.add("Repairs paid: " + cost);
+                settlement.charge(playerId, null, cost, "Repairs");
             }
         }
-
-        return new CardDrawResult(nextAssets, nextLog, sentToJail);
     }
 
     private int nearestAhead(int from, int[] targets, int boardSize) {
@@ -1302,6 +1289,517 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
         return action.tilePosition();
     }
 
+    private MonopolyGameState payDebt(MonopolyGameState state, MonopolyAction action) {
+        PendingDebt debt = state.pendingDebt();
+        if (state.phase() != MonopolyPhase.RAISING_FUNDS || debt == null) {
+            throw new BusinessRuleViolationException("There is no debt to pay");
+        }
+        if (!debt.debtorId().equals(action.actorPlayerId())) {
+            throw new BusinessRuleViolationException("Only the debtor can pay this bill");
+        }
+        Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
+        PlayerAsset debtor = assets.get(debt.debtorId());
+        if (debtor == null || debtor.cash() < debt.amount()) {
+            throw new BusinessRuleViolationException("Insufficient funds");
+        }
+        assets.put(debtor.playerId(), withCash(debtor, debtor.cash() - debt.amount()));
+        credit(assets, debt.creditorId(), debt.amount(), state.bankruptPlayerIds());
+        List<String> log = new ArrayList<>(state.log());
+        log.add(playerLabel(state, debt.debtorId()) + " paid " + debt.amount() + " for " + debt.reason());
+        return continueAfterDebt(
+                state,
+                assets,
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log,
+                state.bankruptPlayerIds(),
+                new ArrayList<>(state.debtQueue()),
+                state.pendingSale());
+    }
+
+    private MonopolyGameState declareBankruptcy(MonopolyGameState state, MonopolyAction action) {
+        PendingDebt debt = state.pendingDebt();
+        if (state.phase() != MonopolyPhase.RAISING_FUNDS || debt == null) {
+            throw new BusinessRuleViolationException("There is no debt to settle");
+        }
+        if (!debt.debtorId().equals(action.actorPlayerId())) {
+            throw new BusinessRuleViolationException("Only the debtor can declare bankruptcy");
+        }
+        UUID debtorId = debt.debtorId();
+        Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
+        Map<Integer, UUID> owners = new HashMap<>(state.owners());
+        Map<Integer, PropertyDevelopment> developments = new HashMap<>(state.developments());
+        Set<Integer> mortgaged = new HashSet<>(state.mortgagedTiles());
+        PlayerAsset debtor = assets.get(debtorId);
+        Set<Integer> tiles = debtor == null ? Set.of() : new HashSet<>(debtor.ownedTilePositions());
+        boolean creditorTakes = debt.creditorId() != null
+                && assets.containsKey(debt.creditorId())
+                && !state.bankruptPlayerIds().contains(debt.creditorId());
+        if (creditorTakes) {
+            PlayerAsset creditor = assets.get(debt.creditorId());
+            Set<Integer> owned = new HashSet<>(creditor.ownedTilePositions());
+            owned.addAll(tiles);
+            assets.put(creditor.playerId(), new PlayerAsset(
+                    creditor.playerId(),
+                    creditor.cash() + (debtor == null ? 0 : debtor.cash()),
+                    creditor.position(),
+                    creditor.inJail(),
+                    creditor.jailTurns(),
+                    owned));
+            for (int pos : tiles) {
+                owners.put(pos, debt.creditorId());
+                developments.remove(pos);
+            }
+        } else {
+            for (int pos : tiles) {
+                owners.remove(pos);
+                developments.remove(pos);
+                mortgaged.remove(pos);
+            }
+        }
+        if (debtor != null) {
+            assets.put(debtorId, new PlayerAsset(debtorId, 0, debtor.position(), false, 0, new HashSet<>()));
+        }
+        Set<UUID> bankrupt = new HashSet<>(state.bankruptPlayerIds());
+        bankrupt.add(debtorId);
+        List<String> log = new ArrayList<>(state.log());
+        log.add(playerLabel(state, debtorId) + " is bankrupt");
+        PendingSale sale = state.pendingSale();
+        if (sale != null && (debtorId.equals(sale.sellerId()) || debtorId.equals(sale.buyerId()))) {
+            sale = null;
+        }
+        List<PendingDebt> queue = new ArrayList<>();
+        for (PendingDebt queued : state.debtQueue()) {
+            if (!debtorId.equals(queued.debtorId())) {
+                queue.add(queued);
+            }
+        }
+        return continueAfterDebt(state, assets, owners, developments, mortgaged, log, bankrupt, queue, sale);
+    }
+
+    private MonopolyGameState proposeSale(MonopolyGameState state, MonopolyAction action) {
+        PendingDebt debt = state.pendingDebt();
+        if (debt == null || !debt.debtorId().equals(action.actorPlayerId())) {
+            throw new BusinessRuleViolationException("Only the debtor can offer a property");
+        }
+        if (state.pendingSale() != null) {
+            throw new BusinessRuleViolationException("A sale offer is already open");
+        }
+        int tilePosition = requiredTilePosition(action);
+        if (!ownsTile(state, action.actorPlayerId(), tilePosition)) {
+            throw new BusinessRuleViolationException("Player does not own this tile");
+        }
+        if (action.targetPlayerId() == null || action.amount() == null || action.amount() <= 0) {
+            throw new BusinessRuleViolationException("Sale requires a buyer and a price");
+        }
+        if (action.targetPlayerId().equals(action.actorPlayerId())
+                || !state.assets().containsKey(action.targetPlayerId())
+                || state.bankruptPlayerIds().contains(action.targetPlayerId())) {
+            throw new BusinessRuleViolationException("Choose another player as the buyer");
+        }
+        PendingSale sale = new PendingSale(action.actorPlayerId(), action.targetPlayerId(), tilePosition, action.amount());
+        List<String> log = append(
+                state.log(),
+                "Offered " + state.board().tileAt(tilePosition).name() + " to "
+                        + playerLabel(state, action.targetPlayerId()) + " for " + action.amount());
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.RAISING_FUNDS,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                new LinkedHashMap<>(state.assets()),
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log,
+                state.activeEvent(),
+                state.pendingDebt(),
+                state.bankruptPlayerIds(),
+                state.debtQueue(),
+                sale);
+    }
+
+    private MonopolyGameState acceptSale(MonopolyGameState state, MonopolyAction action) {
+        PendingSale sale = state.pendingSale();
+        if (sale == null || !sale.buyerId().equals(action.actorPlayerId())) {
+            throw new BusinessRuleViolationException("There is no offer to accept");
+        }
+        if (!ownsTile(state, sale.sellerId(), sale.tilePosition())) {
+            throw new BusinessRuleViolationException("The seller no longer owns this tile");
+        }
+        Map<UUID, PlayerAsset> assets = new LinkedHashMap<>(state.assets());
+        PlayerAsset buyer = assets.get(sale.buyerId());
+        PlayerAsset seller = assets.get(sale.sellerId());
+        if (buyer == null || seller == null || buyer.cash() < sale.price()) {
+            throw new BusinessRuleViolationException("Buyer cannot afford this price");
+        }
+        Set<Integer> sellerTiles = new HashSet<>(seller.ownedTilePositions());
+        Set<Integer> buyerTiles = new HashSet<>(buyer.ownedTilePositions());
+        sellerTiles.remove(sale.tilePosition());
+        buyerTiles.add(sale.tilePosition());
+        assets.put(seller.playerId(), new PlayerAsset(
+                seller.playerId(), seller.cash() + sale.price(), seller.position(), seller.inJail(), seller.jailTurns(), sellerTiles));
+        assets.put(buyer.playerId(), new PlayerAsset(
+                buyer.playerId(), buyer.cash() - sale.price(), buyer.position(), buyer.inJail(), buyer.jailTurns(), buyerTiles));
+        Map<Integer, UUID> owners = new HashMap<>(state.owners());
+        owners.put(sale.tilePosition(), sale.buyerId());
+        List<String> log = append(
+                state.log(),
+                state.board().tileAt(sale.tilePosition()).name() + " sold to "
+                        + playerLabel(state, sale.buyerId()) + " for " + sale.price());
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.RAISING_FUNDS,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                assets,
+                owners,
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log,
+                state.activeEvent(),
+                state.pendingDebt(),
+                state.bankruptPlayerIds(),
+                state.debtQueue(),
+                null);
+    }
+
+    private MonopolyGameState declineSale(MonopolyGameState state, MonopolyAction action) {
+        PendingSale sale = state.pendingSale();
+        if (sale == null || !sale.buyerId().equals(action.actorPlayerId())) {
+            throw new BusinessRuleViolationException("There is no offer to decline");
+        }
+        List<String> log = append(state.log(), playerLabel(state, sale.buyerId()) + " declined the property offer");
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.RAISING_FUNDS,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                new LinkedHashMap<>(state.assets()),
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log,
+                state.activeEvent(),
+                state.pendingDebt(),
+                state.bankruptPlayerIds(),
+                state.debtQueue(),
+                null);
+    }
+
+    private MonopolyGameState continueAfterDebt(
+            MonopolyGameState state,
+            Map<UUID, PlayerAsset> assets,
+            Map<Integer, UUID> owners,
+            Map<Integer, PropertyDevelopment> developments,
+            Set<Integer> mortgagedTiles,
+            List<String> log,
+            Set<UUID> bankrupt,
+            List<PendingDebt> queue,
+            PendingSale sale) {
+        PendingDebt next = null;
+        List<PendingDebt> rest = new ArrayList<>();
+        boolean found = false;
+        for (PendingDebt candidate : queue) {
+            if (found) {
+                rest.add(candidate);
+                continue;
+            }
+            if (bankrupt.contains(candidate.debtorId())) {
+                continue;
+            }
+            PlayerAsset payer = assets.get(candidate.debtorId());
+            if (payer != null && payer.cash() >= candidate.amount()) {
+                assets.put(payer.playerId(), withCash(payer, payer.cash() - candidate.amount()));
+                credit(assets, candidate.creditorId(), candidate.amount(), bankrupt);
+                log.add(playerLabel(state, candidate.debtorId()) + " paid " + candidate.amount() + " for " + candidate.reason());
+                continue;
+            }
+            next = candidate;
+            found = true;
+        }
+        if (next != null) {
+            log.add(playerLabel(state, next.debtorId()) + " cannot pay " + next.amount() + " for " + next.reason()
+                    + ". Sell buildings or mortgage a property.");
+            return new MonopolyGameState(
+                    state.sessionId(),
+                    MonopolyPhase.RAISING_FUNDS,
+                    state.currentPlayerId(),
+                    state.currentTurn(),
+                    state.lastDiceTotal(),
+                    state.board(),
+                    assets,
+                    owners,
+                    developments,
+                    mortgagedTiles,
+                    log,
+                    state.activeEvent(),
+                    next,
+                    bankrupt,
+                    rest,
+                    sale);
+        }
+        long solvent = assets.keySet().stream().filter(id -> !bankrupt.contains(id)).count();
+        if (solvent <= 1) {
+            UUID winner = assets.keySet().stream().filter(id -> !bankrupt.contains(id)).findFirst().orElse(state.currentPlayerId());
+            log.add(playerLabel(state, winner) + " wins the game");
+            return new MonopolyGameState(
+                    state.sessionId(),
+                    MonopolyPhase.ENDED,
+                    winner,
+                    state.currentTurn(),
+                    state.lastDiceTotal(),
+                    state.board(),
+                    assets,
+                    owners,
+                    developments,
+                    mortgagedTiles,
+                    log,
+                    state.activeEvent(),
+                    null,
+                    bankrupt,
+                    List.of(),
+                    null);
+        }
+        if (bankrupt.contains(state.currentPlayerId())) {
+            UUID nextPlayer = nextSolventPlayer(assets, bankrupt, state.currentPlayerId());
+            return new MonopolyGameState(
+                    state.sessionId(),
+                    MonopolyPhase.WAITING_FOR_ROLL,
+                    nextPlayer,
+                    state.currentTurn() + 1,
+                    state.lastDiceTotal(),
+                    state.board(),
+                    assets,
+                    owners,
+                    developments,
+                    mortgagedTiles,
+                    log,
+                    state.activeEvent(),
+                    null,
+                    bankrupt,
+                    List.of(),
+                    null);
+        }
+        return handoverIfIdle(new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.WAITING_FOR_DECISION,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                assets,
+                owners,
+                developments,
+                mortgagedTiles,
+                log,
+                state.activeEvent(),
+                null,
+                bankrupt,
+                List.of(),
+                null));
+    }
+
+    private void credit(Map<UUID, PlayerAsset> assets, UUID creditorId, int amount, Set<UUID> bankrupt) {
+        if (creditorId == null || amount <= 0 || bankrupt.contains(creditorId)) {
+            return;
+        }
+        PlayerAsset creditor = assets.get(creditorId);
+        if (creditor != null) {
+            assets.put(creditor.playerId(), withCash(creditor, creditor.cash() + amount));
+        }
+    }
+
+    private UUID nextSolventPlayer(MonopolyGameState state, UUID from) {
+        return nextSolventPlayer(state.assets(), state.bankruptPlayerIds(), from);
+    }
+
+    private UUID nextSolventPlayer(Map<UUID, PlayerAsset> assets, Set<UUID> bankrupt, UUID from) {
+        List<UUID> players = new ArrayList<>(assets.keySet());
+        if (players.isEmpty()) {
+            return from;
+        }
+        int start = players.indexOf(from);
+        if (start < 0) {
+            start = 0;
+        }
+        for (int step = 1; step <= players.size(); step++) {
+            UUID candidate = players.get((start + step) % players.size());
+            if (!bankrupt.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return from;
+    }
+
+    private MonopolyGameState finishGame(MonopolyGameState state, UUID winner, List<String> log) {
+        log.add(playerLabel(state, winner) + " wins the game");
+        return new MonopolyGameState(
+                state.sessionId(),
+                MonopolyPhase.ENDED,
+                winner,
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                new LinkedHashMap<>(state.assets()),
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                log,
+                state.activeEvent(),
+                null,
+                state.bankruptPlayerIds(),
+                List.of(),
+                null);
+    }
+
+    private MonopolyPhase decisionPhase(MonopolyGameState state) {
+        return state.phase() == MonopolyPhase.RAISING_FUNDS
+                ? MonopolyPhase.RAISING_FUNDS
+                : MonopolyPhase.WAITING_FOR_DECISION;
+    }
+
+    private PlayerAsset withCash(PlayerAsset asset, int cash) {
+        return new PlayerAsset(
+                asset.playerId(),
+                cash,
+                asset.position(),
+                asset.inJail(),
+                asset.jailTurns(),
+                asset.ownedTilePositions());
+    }
+
+    private MonopolyGameState carry(
+            MonopolyGameState state,
+            MonopolyPhase phase,
+            Map<UUID, PlayerAsset> assets,
+            Map<Integer, UUID> owners,
+            Map<Integer, PropertyDevelopment> developments,
+            Set<Integer> mortgagedTiles,
+            List<String> log) {
+        return new MonopolyGameState(
+                state.sessionId(),
+                phase,
+                state.currentPlayerId(),
+                state.currentTurn(),
+                state.lastDiceTotal(),
+                state.board(),
+                assets,
+                owners,
+                developments,
+                mortgagedTiles,
+                log,
+                state.activeEvent(),
+                state.pendingDebt(),
+                state.bankruptPlayerIds(),
+                state.debtQueue(),
+                state.pendingSale());
+    }
+
+    private MonopolyGameState publish(
+            MonopolyGameState state,
+            Settlement settlement,
+            UUID currentPlayerId,
+            int turn,
+            int dice,
+            IndianEvent event) {
+        return new MonopolyGameState(
+                state.sessionId(),
+                settlement.phase,
+                currentPlayerId,
+                turn,
+                dice,
+                state.board(),
+                settlement.assets(),
+                new HashMap<>(state.owners()),
+                new HashMap<>(state.developments()),
+                new HashSet<>(state.mortgagedTiles()),
+                settlement.log(),
+                event,
+                settlement.pendingDebt,
+                state.bankruptPlayerIds(),
+                settlement.debtQueue,
+                null);
+    }
+
+    private final class Settlement {
+        private Map<UUID, PlayerAsset> assets;
+        private final List<String> log;
+        private MonopolyPhase phase;
+        private PendingDebt pendingDebt;
+        private final List<PendingDebt> debtQueue = new ArrayList<>();
+        private final Set<UUID> bankrupt;
+
+        private Settlement(
+                MonopolyGameState state,
+                Map<UUID, PlayerAsset> assets,
+                List<String> log,
+                MonopolyPhase phase) {
+            this.assets = assets;
+            this.log = log;
+            this.phase = phase;
+            this.bankrupt = state.bankruptPlayerIds();
+        }
+
+        private Map<UUID, PlayerAsset> assets() {
+            return assets;
+        }
+
+        private List<String> log() {
+            return log;
+        }
+
+        private void setAssets(Map<UUID, PlayerAsset> assets) {
+            this.assets = assets;
+        }
+
+        private PlayerAsset asset(UUID playerId) {
+            return assets.get(playerId);
+        }
+
+        private void replace(PlayerAsset asset) {
+            assets = new LinkedHashMap<>(assets);
+            assets.put(asset.playerId(), asset);
+        }
+
+        private void charge(UUID payerId, UUID creditorId, int amount, String reason) {
+            if (amount <= 0 || payerId == null || bankrupt.contains(payerId)) {
+                return;
+            }
+            if (pendingDebt != null) {
+                debtQueue.add(new PendingDebt(payerId, creditorId, amount, reason));
+                phase = MonopolyPhase.RAISING_FUNDS;
+                return;
+            }
+            PlayerAsset payer = assets.get(payerId);
+            if (payer == null) {
+                return;
+            }
+            if (payer.cash() >= amount) {
+                replace(withCash(payer, payer.cash() - amount));
+                if (creditorId != null && !bankrupt.contains(creditorId)) {
+                    PlayerAsset creditor = assets.get(creditorId);
+                    if (creditor != null) {
+                        replace(withCash(creditor, creditor.cash() + amount));
+                    }
+                }
+                log.add(reason + " paid: " + amount);
+                return;
+            }
+            pendingDebt = new PendingDebt(payerId, creditorId, amount, reason);
+            phase = MonopolyPhase.RAISING_FUNDS;
+            log.add(playerLabel(null, payerId) + " cannot pay " + amount + " for " + reason
+                    + ". Sell buildings or mortgage a property.");
+        }
+    }
+
     private MonopolyGameState copy(
             MonopolyGameState state,
             MonopolyPhase phase,
@@ -1321,7 +1819,11 @@ public class MonopolyEngine implements GameEngine<MonopolyGameState, MonopolyAct
                 new HashMap<>(state.developments()),
                 new HashSet<>(state.mortgagedTiles()),
                 append(state.log(), logMessage),
-                state.activeEvent());
+                state.activeEvent(),
+                state.pendingDebt(),
+                state.bankruptPlayerIds(),
+                state.debtQueue(),
+                state.pendingSale());
     }
 
     private List<String> append(List<String> log, String message) {

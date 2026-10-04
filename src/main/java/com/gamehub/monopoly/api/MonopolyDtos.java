@@ -41,7 +41,16 @@ public final class MonopolyDtos {
              * without resetting to a fresh 20-second window on page refresh.
              * Null when no auction is active.
              */
-            Map<String, Object> auction) {
+            Map<String, Object> auction,
+            PendingDebtResponse pendingDebt,
+            PendingSaleResponse pendingSale,
+            UUID winnerId) {
+    }
+
+    public record PendingDebtResponse(UUID debtorId, UUID creditorId, int amount, String reason) {
+    }
+
+    public record PendingSaleResponse(UUID sellerId, UUID buyerId, int tilePosition, int price) {
     }
 
     public record IndianEventResponse(
@@ -57,7 +66,8 @@ public final class MonopolyDtos {
             int position,
             boolean inJail,
             int jailTurns,
-            Set<Integer> ownedTilePositions) {
+            Set<Integer> ownedTilePositions,
+            boolean bankrupt) {
     }
 
     public record DevelopmentResponse(

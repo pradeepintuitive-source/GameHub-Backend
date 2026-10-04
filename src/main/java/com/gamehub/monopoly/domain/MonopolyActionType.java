@@ -15,5 +15,10 @@ public enum MonopolyActionType {
     AUCTION,
     BANK_ADJUST,
     BANK_TRANSFER,
-    END_TURN
+    END_TURN,
+    PAY_DEBT,
+    DECLARE_BANKRUPTCY,
+    PROPOSE_SALE,
+    ACCEPT_SALE,
+    DECLINE_SALE
 }
