@@ -1,6 +1,7 @@
 package com.gamehub.room.infrastructure;
 
 import com.gamehub.persistence.infrastructure.BaseEntity;
+import com.gamehub.room.domain.PlayMode;
 import com.gamehub.room.domain.RoomState;
 import com.gamehub.room.domain.RoomType;
 import com.gamehub.room.domain.RoomVisibility;
@@ -44,6 +45,10 @@ public class RoomEntity extends BaseEntity {
 
     @Column(name = "max_players", nullable = false)
     private int maxPlayers;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "play_mode", nullable = false)
+    private PlayMode playMode = PlayMode.ONLINE;
 
     @Column(name = "current_session_id")
     private UUID currentSessionId;

@@ -82,6 +82,14 @@ public class RoomController {
         return roomService.closeRoom(requirePrincipal(principal), roomId);
     }
 
+    @PostMapping("/{roomId}/local-players")
+    public RoomDtos.RoomResponse addLocalPlayers(
+            @PathVariable UUID roomId,
+            @AuthenticationPrincipal GameHubUserPrincipal principal,
+            @Valid @RequestBody RoomDtos.AddLocalPlayersRequest request) {
+        return roomService.addLocalPlayers(requirePrincipal(principal), roomId, request);
+    }
+
     @PostMapping("/{roomId}/ai")
     public RoomDtos.RoomResponse addAi(
             @PathVariable UUID roomId,

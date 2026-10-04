@@ -9,12 +9,14 @@ import com.gamehub.common.domain.BusinessRuleViolationException;
 import com.gamehub.mafia.application.MafiaGameService;
 import com.gamehub.monopoly.application.MonopolyGameService;
 import com.gamehub.player.infrastructure.PlayerRepository;
+import com.gamehub.room.domain.PlayMode;
 import com.gamehub.room.domain.RoomState;
 import com.gamehub.room.infrastructure.RoomEntity;
 import com.gamehub.room.infrastructure.RoomRepository;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import com.gamehub.shared.api.GameDtos;
 import com.gamehub.shared.domain.GameEventType;
+import com.gamehub.shared.domain.GameType;
 import com.gamehub.shared.domain.SessionStatus;
 import com.gamehub.shared.infrastructure.GameSessionEntity;
 import com.gamehub.shared.infrastructure.GameSessionRepository;
@@ -131,9 +133,26 @@ public class GameSessionService {
 
     @Transactional(readOnly = true)
     public UUID resolveActorPlayerId(UUID roomId, UUID userId) {
-        return playerRepository.findByRoomIdAndUserId(roomId, userId)
-                .orElseThrow(() -> new BusinessRuleViolationException("Player is not part of room"))
-                .getId();
+        var self = playerRepository.findByRoomIdAndUserId(roomId, userId)
+                .orElseThrow(() -> new BusinessRuleViolationException("Player is not part of room"));
+        RoomEntity room = roomRepository.findById(roomId).orElse(null);
+        if (room == null
+                || room.getPlayMode() != PlayMode.LOCAL
+                || !room.getHostUserId().equals(userId)
+                || room.getCurrentSessionId() == null
+                || room.getGameType() != GameType.MONOPOLY) {
+            return self.getId();
+        }
+        try {
+            GameSessionEntity session = gameSessionRepository.findById(room.getCurrentSessionId()).orElse(null);
+            if (session == null) {
+                return self.getId();
+            }
+            var currentPlayerId = monopolyGameService.getState(session).currentPlayerId();
+            return currentPlayerId != null ? currentPlayerId : self.getId();
+        } catch (RuntimeException ex) {
+            return self.getId();
+        }
     }
 
     @Transactional(readOnly = true)

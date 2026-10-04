@@ -2,6 +2,7 @@ package com.gamehub.room.api;
 
 import com.gamehub.ai.domain.AiDifficulty;
 import com.gamehub.ai.domain.AiType;
+import com.gamehub.room.domain.PlayMode;
 import com.gamehub.room.domain.RoomState;
 import com.gamehub.room.domain.RoomType;
 import com.gamehub.room.domain.RoomVisibility;
@@ -9,7 +10,9 @@ import com.gamehub.shared.domain.GameType;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import java.util.List;
 import java.util.UUID;
 
@@ -36,6 +39,10 @@ public final class RoomDtos {
             @NotNull AiDifficulty aiDifficulty) {
     }
 
+    public record AddLocalPlayersRequest(
+            @NotEmpty @Size(min = 2, max = 6) List<@NotBlank @Size(max = 80) String> players) {
+    }
+
     public record RoomResponse(
             UUID id,
             String roomCode,
@@ -46,7 +53,8 @@ public final class RoomDtos {
             RoomState state,
             int maxPlayers,
             List<PlayerSummary> players,
-            UUID currentSessionId) {
+            UUID currentSessionId,
+            PlayMode playMode) {
     }
 
     public record PlayerSummary(

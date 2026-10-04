@@ -16,11 +16,16 @@ import com.gamehub.notification.domain.NotificationMessage;
 import com.gamehub.player.application.UserService;
 import com.gamehub.player.infrastructure.PlayerEntity;
 import com.gamehub.player.infrastructure.PlayerRepository;
+import com.gamehub.player.infrastructure.UserEntity;
+import com.gamehub.player.infrastructure.UserRepository;
 import com.gamehub.room.api.RoomDtos;
+import com.gamehub.room.domain.PlayMode;
 import com.gamehub.room.domain.RoomState;
+import com.gamehub.room.domain.RoomVisibility;
 import com.gamehub.room.infrastructure.RoomEntity;
 import com.gamehub.room.infrastructure.RoomMapper;
 import com.gamehub.room.infrastructure.RoomRepository;
+import com.gamehub.security.domain.UserRole;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import com.gamehub.shared.application.GameEventService;
 import com.gamehub.shared.application.SaveGameService;
@@ -53,6 +58,7 @@ public class RoomService {
 
     private final RoomRepository roomRepository;
     private final PlayerRepository playerRepository;
+    private final UserRepository userRepository;
     private final RoomMapper roomMapper;
     private final UserService userService;
     private final GameEventService gameEventService;
@@ -83,6 +89,7 @@ public class RoomService {
         roomEntity.setVisibility(request.visibility());
         roomEntity.setState(RoomState.WAITING);
         roomEntity.setMaxPlayers(request.maxPlayers());
+        roomEntity.setPlayMode(PlayMode.ONLINE);
         roomRepository.save(roomEntity);
 
         var user = userService.getCurrentUser(principal);
@@ -117,6 +124,9 @@ public class RoomService {
     public RoomDtos.RoomResponse joinRoom(GameHubUserPrincipal principal, RoomDtos.JoinRoomRequest request) {
         logger.info("joinRoom for user={} request={} roomCode={}", principal.userId(), request, request.roomCode());
         RoomEntity room = resolveRoom(request);
+        if (room.getPlayMode() == PlayMode.LOCAL && !room.getHostUserId().equals(principal.userId())) {
+            throw new BusinessRuleViolationException("This match is played on one device");
+        }
         if (playerRepository.findByRoomIdAndUserId(room.getId(), principal.userId()).isPresent()) {
             PlayerEntity existingPlayer = playerRepository.findByRoomIdAndUserId(room.getId(), principal.userId()).get();
             existingPlayer.setConnected(true);
@@ -177,6 +187,80 @@ public class RoomService {
         gameEventService.record(roomId, room.getCurrentSessionId(), GameEventType.PLAYER_JOINED, principal.userId(), request.displayName());
         broadcastRoomAfterCommit(roomId);
         return toResponse(room);
+    }
+
+    public RoomDtos.RoomResponse addLocalPlayers(
+            GameHubUserPrincipal principal, UUID roomId, RoomDtos.AddLocalPlayersRequest request) {
+        RoomEntity room = requireRoom(roomId);
+        assertHost(room, principal.userId());
+        if (room.getState() != RoomState.WAITING) {
+            throw new BusinessRuleViolationException("Players can only be named before the match starts");
+        }
+        List<String> names = request.players().stream()
+                .map(name -> name == null ? "" : name.trim())
+                .filter(name -> !name.isEmpty())
+                .toList();
+        if (names.size() < 2 || names.size() > 6) {
+            throw new BusinessRuleViolationException("A same-device match needs 2 to 6 players");
+        }
+
+        PlayerEntity host = playerRepository.findByRoomIdAndUserId(roomId, principal.userId())
+                .orElseThrow(() -> new BusinessRuleViolationException("Player is not part of room"));
+        playerRepository.findByRoomIdOrderBySeatOrder(roomId).stream()
+                .filter(player -> !player.getId().equals(host.getId()))
+                .forEach(playerRepository::delete);
+        playerRepository.flush();
+
+        host.setDisplayName(names.getFirst());
+        host.setConnected(true);
+        host.setReady(true);
+        host.setAiControlled(false);
+        host.setSeatOrder(1);
+        playerRepository.save(host);
+
+        room.setPlayMode(PlayMode.LOCAL);
+        room.setVisibility(RoomVisibility.PRIVATE);
+        room.setMaxPlayers(names.size());
+        roomRepository.save(room);
+
+        for (int index = 1; index < names.size(); index++) {
+            UserEntity seatUser = new UserEntity();
+            seatUser.setId(UUID.randomUUID());
+            seatUser.setUsername("seat-" + seatUser.getId().toString().replace("-", "").substring(0, 12));
+            seatUser.setPasswordHash("{noop}local-seat");
+            seatUser.setGuest(true);
+            seatUser.setRoles(UserRole.GUEST.name());
+            userRepository.save(seatUser);
+
+            PlayerEntity seat = new PlayerEntity();
+            seat.setId(UUID.randomUUID());
+            seat.setRoomId(roomId);
+            seat.setUserId(seatUser.getId());
+            seat.setDisplayName(names.get(index));
+            seat.setConnected(true);
+            seat.setReady(true);
+            seat.setAiControlled(false);
+            seat.setSeatOrder(index + 1);
+            playerRepository.save(seat);
+        }
+
+        auditService.record(
+                AuditType.ROOM_EVENT,
+                roomId,
+                room.getCurrentSessionId(),
+                principal.userId(),
+                "Local players named",
+                String.join(", ", names));
+        gameEventService.record(
+                roomId, room.getCurrentSessionId(), GameEventType.PLAYER_JOINED, principal.userId(), String.join(", ", names));
+        broadcastRoomAfterCommit(roomId);
+        return toResponse(room);
+    }
+
+    public boolean isLocalHost(UUID roomId, UUID userId) {
+        return roomRepository.findById(roomId)
+                .filter(room -> room.getPlayMode() == PlayMode.LOCAL && room.getHostUserId().equals(userId))
+                .isPresent();
     }
 
     public RoomDtos.RoomResponse leaveRoom(GameHubUserPrincipal principal, UUID roomId) {
@@ -322,7 +406,8 @@ public class RoomService {
                 roomEntity.getState(),
                 roomEntity.getMaxPlayers(),
                 players,
-                roomEntity.getCurrentSessionId());
+                roomEntity.getCurrentSessionId(),
+                roomEntity.getPlayMode() == null ? PlayMode.ONLINE : roomEntity.getPlayMode());
     }
 
     private void broadcastRoomAfterCommit(UUID roomId) {

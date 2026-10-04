@@ -2,6 +2,7 @@ package com.gamehub.monopoly.infrastructure;
 
 import com.gamehub.monopoly.application.AuctionService;
 import com.gamehub.monopoly.application.AuctionService.AuctionException;
+import com.gamehub.room.application.RoomService;
 import com.gamehub.security.infrastructure.GameHubUserPrincipal;
 import com.gamehub.shared.application.GameSessionService;
 import com.gamehub.websocket.application.ActionAckService;
@@ -43,6 +44,7 @@ public class AuctionStompController {
 
     private final AuctionService auctionService;
     private final GameSessionService gameSessionService;
+    private final RoomService roomService;
     private final ActionAckService actionAckService;
 
     /** Inbound STOMP message shape from the frontend. */
@@ -85,6 +87,7 @@ public class AuctionStompController {
                 }
 
                 case "PLACE_BID" -> {
+                    actorPlayerId = localAuctionActor(session.getRoomId(), userId, actorPlayerId, sessionId);
                     if (msg.amount() == null) {
                         actionAckService.sendAck(userId, msg.requestId(), act, false,
                                 "INVALID_REQUEST", "amount is required for PLACE_BID", Map.of());
@@ -95,6 +98,7 @@ public class AuctionStompController {
                 }
 
                 case "PASS" -> {
+                    actorPlayerId = localAuctionActor(session.getRoomId(), userId, actorPlayerId, sessionId);
                     auctionService.passBid(sessionId, actorPlayerId);
                     actionAckService.sendAck(userId, msg.requestId(), act, true, null, null, Map.of());
                 }
@@ -121,6 +125,14 @@ public class AuctionStompController {
     // -----------------------------------------------------------------------
     // Helper
     // -----------------------------------------------------------------------
+
+    private UUID localAuctionActor(UUID roomId, UUID userId, UUID actorPlayerId, UUID sessionId) {
+        if (!roomService.isLocalHost(roomId, userId)) {
+            return actorPlayerId;
+        }
+        UUID bidderId = auctionService.currentBidderId(sessionId);
+        return bidderId != null ? bidderId : actorPlayerId;
+    }
 
     private GameHubUserPrincipal resolveUserPrincipal(Principal principal) {
         if (principal instanceof Authentication auth

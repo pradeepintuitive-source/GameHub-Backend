@@ -287,6 +287,11 @@ public class AuctionService {
     // -----------------------------------------------------------------------
 
     /** Returns the live auction for a session, or {@code empty} if none. */
+    public UUID currentBidderId(UUID sessionId) {
+        Auction auction = auctions.get(sessionId);
+        return auction == null ? null : auction.currentBidderId();
+    }
+
     public Optional<Auction> findAuction(UUID sessionId) {
         return Optional.ofNullable(auctions.get(sessionId));
     }
